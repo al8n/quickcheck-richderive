@@ -190,3 +190,34 @@ fn projected_field_type_is_bounded() {
   let value: Projected<NotArb> = Projected::arbitrary(&mut g);
   let _shrinks: Vec<Projected<NotArb>> = value.shrink().collect();
 }
+
+// --- const-generic field-type inference (round-3 finding A) ---
+//
+// `Only<N>` is `Arbitrary` only for `N == 3`. The generated field `inner:
+// Only<N>` must yield a `where Only<N>: Arbitrary` predicate (a const param
+// counts as "mentioning a generic param"); otherwise the generic body would
+// require `Only<N>: Arbitrary` for all `N` and fail to compile.
+#[allow(non_upper_case_globals)]
+#[derive(Clone, Debug, PartialEq)]
+struct Only<const N: usize>;
+
+impl Arbitrary for Only<3> {
+  fn arbitrary(_g: &mut Gen) -> Self {
+    Only
+  }
+}
+
+#[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
+struct ConstField<const N: usize> {
+  inner: Only<N>,
+  tag: u8,
+}
+
+#[test]
+fn const_generic_field_type_is_bounded() {
+  let mut g = gen();
+  // Compiles only because the derive emits `where Only<N>: Arbitrary`
+  // (`Only<3>: Arbitrary` holds).
+  let value: ConstField<3> = ConstField::arbitrary(&mut g);
+  let _shrinks: Vec<ConstField<3>> = value.shrink().collect();
+}

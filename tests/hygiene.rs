@@ -140,3 +140,11 @@ fn enum_fields_named_like_macro_internals() {
   let mut gen = gen();
   let _generated = InternalNames::arbitrary(&mut gen);
 }
+
+// NOTE on the residual limitation: a user `const` parameter named *exactly* like
+// one of the macro's generated locals (e.g. `const __quickcheck_chain`) still
+// cannot be supported — rustc rejects it with E0530 ("let bindings cannot shadow
+// const parameters") and resolves identically-named pattern bindings to the const
+// param, *both pre-hygiene*, so even `Span::mixed_site()` idents collide. No
+// derive can generate a binding guaranteed distinct from such a const param; the
+// `__quickcheck_` prefix makes this an effectively impossible name in practice.

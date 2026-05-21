@@ -36,8 +36,9 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
   validate_all_attrs(&input)?;
 
   // The hygienic `&mut Gen` parameter ident, shared by the impl signature and
-  // every generated body so they agree even if the user has a `const g` param.
-  let g = Ident::new("__quickcheck_g", Span::call_site());
+  // every generated body. `mixed_site` hygiene means it cannot collide with any
+  // user identifier (e.g. a `const __quickcheck_g` parameter).
+  let g = Ident::new("__quickcheck_g", Span::mixed_site());
 
   let name = &input.ident;
   let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
@@ -113,16 +114,22 @@ fn build_where_clause(input: &DeriveInput, container: &ContainerAttrs, qc: &Path
 /// types (mentioning no param) are left to the call site, so we don't emit
 /// redundant `u32: Arbitrary`-style bounds.
 ///
+/// A field type is considered to "mention a generic param" if it references any
+/// generic **type or const** param — so const-generic-bearing field types
+/// (`Only<N>`, `[u8; N]`) are bounded too, not just type-param ones.
+///
 /// Deduplicated, in first-seen order. Parse errors are ignored here — they are
 /// surfaced by [`validate_all_attrs`] / codegen, so this best-effort inference
 /// simply contributes nothing for an unparsable field.
 fn inferred_bound_types(input: &DeriveInput, container: &ContainerAttrs) -> Vec<Type> {
-  let type_param_idents: Vec<Ident> = input
+  // Generic type *and* const params (lifetimes never need an `Arbitrary` bound).
+  let param_idents: Vec<Ident> = input
     .generics
     .type_params()
     .map(|p| p.ident.clone())
+    .chain(input.generics.const_params().map(|p| p.ident.clone()))
     .collect();
-  if type_param_idents.is_empty() {
+  if param_idents.is_empty() {
     return Vec::new();
   }
 
@@ -154,7 +161,7 @@ fn inferred_bound_types(input: &DeriveInput, container: &ContainerAttrs) -> Vec<
   let mut seen = std::collections::HashSet::new();
   generated_tys
     .into_iter()
-    .filter(|ty| type_param_idents.iter().any(|p| type_uses_param(ty, p)))
+    .filter(|ty| param_idents.iter().any(|p| type_uses_param(ty, p)))
     .filter(|ty| seen.insert(quote!(#ty).to_string()))
     .collect()
 }
