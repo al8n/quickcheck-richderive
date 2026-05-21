@@ -1,5 +1,9 @@
 //! Generic structs: inferred bounds and explicit `bound = "..."`.
 
+// The lifetime-generic test's *generated* impl uses its lifetime once; that's
+// expected for derive output, not a real single-use lifetime.
+#![allow(single_use_lifetimes)]
+
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_derive::Arbitrary as DeriveArbitrary;
 
@@ -239,4 +243,50 @@ fn nested_generic_fields_compile() {
   let mut g = gen();
   let value: Nested<u8> = Nested::arbitrary(&mut g);
   let _shrinks: Vec<Nested<u8>> = value.shrink().collect();
+}
+
+// --- exact `Self: Clone + 'static` supertrait bound (round-6 finding 2) ---
+//
+// A manually-`Clone` type whose `Clone` does NOT require `T: Clone` derives
+// Arbitrary even with a non-`Clone` `T`, because inference bounds `Self: Clone`
+// (holds via the manual impl) rather than `T: Clone` (which would not).
+#[derive(Debug, PartialEq, DeriveArbitrary)]
+struct ManualClone<T> {
+  keep: u32,
+  #[quickcheck(default)]
+  _p: core::marker::PhantomData<T>,
+}
+
+impl<T> Clone for ManualClone<T> {
+  fn clone(&self) -> Self {
+    Self {
+      keep: self.keep,
+      _p: core::marker::PhantomData,
+    }
+  }
+}
+
+// Neither `Clone` nor `Arbitrary` (but `'static`).
+struct NotCloneNotArb;
+
+#[test]
+fn manual_clone_with_non_clone_param() {
+  let mut g = gen();
+  let value: ManualClone<NotCloneNotArb> = ManualClone::arbitrary(&mut g);
+  let _shrinks: Vec<ManualClone<NotCloneNotArb>> = value.shrink().collect();
+}
+
+// A lifetime-generic target: `Self: 'static` correctly requires `'a: 'static`,
+// so `WithLt<'static>` is `Arbitrary`.
+#[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
+struct WithLt<'a> {
+  n: u32,
+  #[quickcheck(default)]
+  _p: core::marker::PhantomData<&'a ()>,
+}
+
+#[test]
+fn lifetime_generic_static() {
+  let mut g = gen();
+  let _v: WithLt<'static> = WithLt::arbitrary(&mut g);
 }

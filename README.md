@@ -93,13 +93,14 @@ Arbitrary` for a projection, or `Only<N>: Arbitrary` for a const-generic field
 type. Fields produced via `with` / `default`, and `skip` / variant-`with`
 variants, contribute no bound (they are never generated via `Arbitrary`).
 Bounding the field types — rather than the params inside them — keeps projected /
-associated types sound. It additionally adds **`T: Clone + 'static` for every
-generic type parameter**, which the `Arbitrary: Clone + 'static` supertrait on
-`Self` requires (a `Vec<T>: Arbitrary` bound does **not** imply `T: Clone`, yet
-the derived `Clone for Foo<T>` needs it). If you supply one or more `bound`
-attributes, they **replace** that inference entirely: the generated `where`
-clause becomes the type's own predicates **plus exactly** the predicates you list
-(multiple `bound = "..."` accumulate).
+associated types sound. It additionally adds a single **`Self: Clone + 'static`**
+bound — the exact `Arbitrary: Clone + 'static` supertrait obligation on the
+implementing type, which a `<FieldTy>: Arbitrary` bound (e.g. `Vec<T>: Arbitrary`)
+does **not** imply. Bounding `Self` rather than each `T` avoids over-constraining
+manually-`Clone` types and correctly handles lifetime-generic targets. If you
+supply one or more `bound` attributes, they **replace** that inference entirely:
+the generated `where` clause becomes the type's own predicates **plus exactly**
+the predicates you list (multiple `bound = "..."` accumulate).
 
 ```rust,ignore
 // Default inference: `where T: quickcheck::Arbitrary`.
@@ -255,7 +256,8 @@ fn gen_pixels(g: &mut Gen) -> Pixels { Pixels::arbitrary(g) }
 
 - **Output** — wrapped in `const _: () = { impl … { fn arbitrary; fn shrink } };`;
   `Arbitrary` / `Gen` are referenced through the `crate` path.
-- **`where` clause** — `split_for_impl` + either explicit `bound`s or an inferred
+- **`where` clause** — `split_for_impl` + either explicit `bound`s or inferred
+  predicates: `Self: Clone + 'static` (the `Arbitrary` supertrait) plus a
   `<FieldTy>: <crate>::Arbitrary` per generated field type that mentions a generic
   (type or const) param.
 - **Struct** — `arbitrary` builds the struct literal (each field per its rule);
@@ -285,8 +287,12 @@ returns:
   `::alloc::boxed::Box<dyn Iterator<…>>` instead. Enable with
   `default-features = false, features = ["alloc"]`.
 
-A container `#[quickcheck(box = "...")]` overrides the `Box` path regardless of
-feature. (Generation otherwise uses only `core` paths — `core::iter`,
+Because Cargo **unifies** features and a proc-macro is compiled **once**, the
+`std`/`alloc` choice is workspace-global, not per-consumer: `std` wins if both end
+up enabled, and with **neither** the derive emits a `compile_error!` rather than
+guessing. In a workspace where the wrong default is forced on a no-std consumer,
+use the per-type `#[quickcheck(box = "...")]` override — it is unification-immune.
+(Generation otherwise uses only `core` paths — `core::iter::Iterator`,
 `core::clone::Clone`, `core::default::Default` — so the output is no-std-ready.)
 
 ## License

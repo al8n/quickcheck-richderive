@@ -45,7 +45,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
 
   // The `Box` type for `shrink`'s return: an explicit `box = "..."` override, or
   // `::std::boxed::Box` (`std` feature) / `::alloc::boxed::Box` (no-std).
-  let box_ty = box_path(&container);
+  let box_ty = box_path(&container)?;
 
   let name = &input.ident;
   let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
@@ -79,16 +79,34 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
   })
 }
 
-/// The `Box` path for `shrink`'s return type: an explicit container
-/// `box = "..."`, else `::std::boxed::Box` (with the `std` feature) or
-/// `::alloc::boxed::Box` (no-std).
-fn box_path(container: &ContainerAttrs) -> Path {
+/// The `Box` path for `shrink`'s return type.
+///
+/// An explicit container `box = "..."` always wins (and is the only
+/// per-invocation, unification-immune selector). Otherwise the choice comes from
+/// this crate's features — but note Cargo **unifies** features and a proc-macro
+/// is compiled **once**, so the feature default is workspace-global, not
+/// per-consumer. `std` takes precedence when both are active; with neither, we
+/// error rather than silently guess. A no-std consumer in a workspace where
+/// `std` gets forced on must set `#[quickcheck(box = "::alloc::boxed::Box")]`.
+fn box_path(container: &ContainerAttrs) -> syn::Result<Path> {
   if let Some(p) = &container.box_path {
-    p.clone()
-  } else if cfg!(feature = "std") {
-    syn::parse_quote!(::std::boxed::Box)
-  } else {
-    syn::parse_quote!(::alloc::boxed::Box)
+    return Ok(p.clone());
+  }
+  #[cfg(feature = "std")]
+  {
+    Ok(syn::parse_quote!(::std::boxed::Box))
+  }
+  #[cfg(all(not(feature = "std"), feature = "alloc"))]
+  {
+    Ok(syn::parse_quote!(::alloc::boxed::Box))
+  }
+  #[cfg(all(not(feature = "std"), not(feature = "alloc")))]
+  {
+    Err(syn::Error::new(
+      proc_macro2::Span::call_site(),
+      "quickcheck-derive: no `Box` type available — enable the `std` (default) or \
+       `alloc` feature, or set a container `#[quickcheck(box = \"...\")]`",
+    ))
   }
 }
 
@@ -114,9 +132,12 @@ fn build_where_clause(input: &DeriveInput, container: &ContainerAttrs, qc: &Path
     .unwrap_or_default();
 
   if container.bounds.is_empty() {
-    for type_param in input.generics.type_params() {
-      let ident = &type_param.ident;
-      predicates.push(syn::parse_quote!(#ident: ::core::clone::Clone + 'static));
+    // State the `Arbitrary: Clone + 'static` supertrait obligation exactly, on
+    // the implementing type itself — not approximated as `T: Clone + 'static`
+    // per param (which would over-constrain manual-`Clone` types and miss
+    // lifetime outlives bounds). `Self` resolves to the implementing type.
+    if !input.generics.params.is_empty() {
+      predicates.push(syn::parse_quote!(Self: ::core::clone::Clone + 'static));
     }
     for ty in inferred_bound_types(input, container) {
       predicates.push(syn::parse_quote!(#ty: #qc::Arbitrary));
