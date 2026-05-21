@@ -1,0 +1,5 @@
+error: unknown field attribute; expected `with`, `shrink`, or `default`
+ --> tests/ui/container_with_bogus_field.rs:8:16
+  |
+8 |   #[quickcheck(bogus)]
+  |                ^^^^^
