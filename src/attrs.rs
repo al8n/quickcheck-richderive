@@ -37,6 +37,10 @@ pub(crate) struct ContainerAttrs {
   pub(crate) with: Option<Path>,
   /// `shrink = "fn"` — shrink the entire value via this function.
   pub(crate) shrink: Option<Path>,
+  /// `box = "path::to::Box"` — override the `Box` type used in the generated
+  /// `shrink` return. Defaults to `::std::boxed::Box` (with the `std` feature) or
+  /// `::alloc::boxed::Box` (no-std).
+  pub(crate) box_path: Option<Path>,
 }
 
 impl ContainerAttrs {
@@ -59,11 +63,13 @@ impl ContainerAttrs {
         } else if meta.path.is_ident("shrink") {
           let lit: syn::LitStr = meta.value()?.parse()?;
           out.shrink = Some(parse_path(&lit)?);
+        } else if meta.path.is_ident("box") {
+          let lit: syn::LitStr = meta.value()?.parse()?;
+          out.box_path = Some(parse_path(&lit)?);
         } else {
-          return Err(
-            meta
-              .error("unknown container attribute; expected `crate`, `bound`, `with`, or `shrink`"),
-          );
+          return Err(meta.error(
+            "unknown container attribute; expected `crate`, `bound`, `with`, `shrink`, or `box`",
+          ));
         }
         Ok(())
       })?;

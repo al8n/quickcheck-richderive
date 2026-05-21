@@ -88,6 +88,7 @@ pub(crate) fn struct_bodies(
   container: &ContainerAttrs,
   g: &Ident,
   hyg: &Hygiene,
+  box_ty: &Path,
   qc: &Path,
 ) -> syn::Result<(TokenStream2, TokenStream2)> {
   let field_attrs = parse_field_attrs(fields)?;
@@ -105,9 +106,9 @@ pub(crate) fn struct_bodies(
   let shrink = if let Some(shrink) = &container.shrink {
     quote!(#shrink(self))
   } else if container.with.is_some() {
-    empty_iter()
+    empty_iter(box_ty)
   } else {
-    struct_shrink(fields, &field_attrs, hyg, qc)
+    struct_shrink(fields, &field_attrs, hyg, box_ty, qc)
   };
 
   Ok((arbitrary, shrink))
@@ -123,6 +124,7 @@ pub(crate) fn enum_bodies(
   container: &ContainerAttrs,
   g: &Ident,
   hyg: &Hygiene,
+  box_ty: &Path,
   qc: &Path,
 ) -> syn::Result<(TokenStream2, TokenStream2)> {
   // --- arbitrary ---
@@ -137,9 +139,9 @@ pub(crate) fn enum_bodies(
   let shrink = if let Some(shrink) = &container.shrink {
     quote!(#shrink(self))
   } else if container.with.is_some() {
-    empty_iter()
+    empty_iter(box_ty)
   } else {
-    enum_shrink(name, data, hyg, qc)?
+    enum_shrink(name, data, hyg, box_ty, qc)?
   };
 
   Ok((arbitrary, shrink))
@@ -189,6 +191,7 @@ fn struct_shrink(
   fields: &Fields,
   field_attrs: &[FieldAttrs],
   hyg: &Hygiene,
+  box_ty: &Path,
   qc: &Path,
 ) -> TokenStream2 {
   let chain = hyg.ident("__quickcheck_chain");
@@ -206,7 +209,7 @@ fn struct_shrink(
     clauses.push(quote! {
       {
         let #base = ::core::clone::Clone::clone(self);
-        #chain = ::std::boxed::Box::new(#chain.chain(
+        #chain = #box_ty::new(#chain.chain(
           (#iter).map(move |#v| {
             let mut #out = ::core::clone::Clone::clone(&#base);
             #out.#member = #v;
@@ -218,12 +221,12 @@ fn struct_shrink(
   }
 
   if clauses.is_empty() {
-    return quote!(::std::boxed::Box::new(::core::iter::empty()));
+    return empty_iter(box_ty);
   }
 
   quote! {
-    let mut #chain: ::std::boxed::Box<dyn ::std::iter::Iterator<Item = Self>> =
-      ::std::boxed::Box::new(::core::iter::empty());
+    let mut #chain: #box_ty<dyn ::core::iter::Iterator<Item = Self>> =
+      #box_ty::new(::core::iter::empty());
     #(#clauses)*
     #chain
   }
@@ -297,9 +300,10 @@ fn enum_shrink(
   name: &Ident,
   data: &DataEnum,
   hyg: &Hygiene,
+  box_ty: &Path,
   qc: &Path,
 ) -> syn::Result<TokenStream2> {
-  let empty = empty_iter();
+  let empty = empty_iter(box_ty);
   let mut arms = Vec::new();
 
   for variant in &data.variants {
@@ -321,7 +325,7 @@ fn enum_shrink(
       quote!(#pattern => { #empty } , )
     } else {
       let fattrs = parse_field_attrs(&variant.fields)?;
-      let (pattern, body) = variant_shrink(name, vname, &variant.fields, &fattrs, hyg, qc);
+      let (pattern, body) = variant_shrink(name, vname, &variant.fields, &fattrs, hyg, box_ty, qc);
       quote!(#pattern => { #body } , )
     };
 
@@ -330,7 +334,7 @@ fn enum_shrink(
 
   if arms.is_empty() {
     // Empty enums are uninhabited; nothing to shrink.
-    return Ok(empty_iter());
+    return Ok(empty_iter(box_ty));
   }
 
   Ok(quote! {
@@ -361,9 +365,13 @@ fn variant_shrink(
   fields: &Fields,
   field_attrs: &[FieldAttrs],
   hyg: &Hygiene,
+  box_ty: &Path,
   qc: &Path,
 ) -> (TokenStream2, TokenStream2) {
-  let nothing = (variant_wildcard_pattern(name, vname, fields), empty_iter());
+  let nothing = (
+    variant_wildcard_pattern(name, vname, fields),
+    empty_iter(box_ty),
+  );
 
   if matches!(fields, Fields::Unit) {
     return nothing;
@@ -414,7 +422,7 @@ fn variant_shrink(
     clauses.push(quote! {
       {
         #(#clones)*
-        #chain = ::std::boxed::Box::new(#chain.chain(
+        #chain = #box_ty::new(#chain.chain(
           (#iter).map(move |#shrunk| {
             #rebuild
           })
@@ -441,8 +449,8 @@ fn variant_shrink(
   };
 
   let body = quote! {
-    let mut #chain: ::std::boxed::Box<dyn ::std::iter::Iterator<Item = Self>> =
-      ::std::boxed::Box::new(::core::iter::empty());
+    let mut #chain: #box_ty<dyn ::core::iter::Iterator<Item = Self>> =
+      #box_ty::new(::core::iter::empty());
     #(#clauses)*
     #chain
   };
@@ -489,7 +497,7 @@ fn rebuild_variant(
   }
 }
 
-/// `Box::new(empty())`.
-fn empty_iter() -> TokenStream2 {
-  quote!(::std::boxed::Box::new(::core::iter::empty()))
+/// `<box_ty>::new(empty())`.
+fn empty_iter(box_ty: &Path) -> TokenStream2 {
+  quote!(#box_ty::new(::core::iter::empty()))
 }

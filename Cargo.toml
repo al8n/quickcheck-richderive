@@ -15,6 +15,14 @@ categories = ["development-tools::testing", "rust-patterns"]
 name = "quickcheck_derive"
 proc-macro = true
 
+[features]
+default = ["std"]
+# Generated `shrink` returns `::std::boxed::Box<dyn Iterator<…>>`.
+std = []
+# no-std: generated `shrink` returns `::alloc::boxed::Box<dyn Iterator<…>>`
+# instead. (A container `#[quickcheck(box = "…")]` overrides either default.)
+alloc = []
+
 [dependencies]
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"

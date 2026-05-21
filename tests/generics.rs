@@ -221,3 +221,22 @@ fn const_generic_field_type_is_bounded() {
   let value: ConstField<3> = ConstField::arbitrary(&mut g);
   let _shrinks: Vec<ConstField<3>> = value.shrink().collect();
 }
+
+// --- nested generic field types satisfy the `Clone` supertrait (round-5) ---
+//
+// `Vec<T>` / `Option<T>` fields get a `<FieldTy>: Arbitrary` bound; every type
+// param additionally gets `T: Clone + 'static`, so the `Arbitrary: Clone +
+// 'static` supertrait on `Self` is satisfiable. (`Vec<T>: Arbitrary` alone does
+// not imply `T: Clone`, which the derived `Clone for Nested<T>` requires.)
+#[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
+struct Nested<T> {
+  xs: Vec<T>,
+  maybe: Option<T>,
+}
+
+#[test]
+fn nested_generic_fields_compile() {
+  let mut g = gen();
+  let value: Nested<u8> = Nested::arbitrary(&mut g);
+  let _shrinks: Vec<Nested<u8>> = value.shrink().collect();
+}

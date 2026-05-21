@@ -61,6 +61,7 @@ each enum **variant**.
 | [`bound = "..."`](#bound--p-bound-q-other-repeatable) | **Repeatable.** Replaces the inferred generic bounds. |
 | [`with = "..."`](#container-with--shrink) | Generate the whole value via a function. |
 | [`shrink = "..."`](#container-with--shrink) | Shrink the whole value via a function. |
+| [`box = "..."`](#box--pathtobox) | Override the `Box` type used in the `shrink` return. |
 
 #### `crate = "path::to::quickcheck"`
 
@@ -92,10 +93,13 @@ Arbitrary` for a projection, or `Only<N>: Arbitrary` for a const-generic field
 type. Fields produced via `with` / `default`, and `skip` / variant-`with`
 variants, contribute no bound (they are never generated via `Arbitrary`).
 Bounding the field types — rather than the params inside them — keeps projected /
-associated types sound. If you supply one or more `bound` attributes, they
-**replace** that inference entirely: the generated `where` clause becomes the
-type's own predicates **plus exactly** the predicates you list (multiple
-`bound = "..."` accumulate).
+associated types sound. It additionally adds **`T: Clone + 'static` for every
+generic type parameter**, which the `Arbitrary: Clone + 'static` supertrait on
+`Self` requires (a `Vec<T>: Arbitrary` bound does **not** imply `T: Clone`, yet
+the derived `Clone for Foo<T>` needs it). If you supply one or more `bound`
+attributes, they **replace** that inference entirely: the generated `where`
+clause becomes the type's own predicates **plus exactly** the predicates you list
+(multiple `bound = "..."` accumulate).
 
 ```rust,ignore
 // Default inference: `where T: quickcheck::Arbitrary`.
@@ -147,6 +151,20 @@ fn gen_geo(g: &mut Gen) -> GeoLocation {
     let lon = (i64::arbitrary(g) % 18_001) as f64 / 100.0; // [-180, 180]
     GeoLocation::try_new(lat, lon, None).unwrap()
 }
+```
+
+#### `box = "path::to::Box"`
+
+Override the `Box` type in the generated `shrink` return
+(`shrink(&self) -> Box<dyn Iterator<Item = Self>>`). By default it is
+`::std::boxed::Box` with the `std` feature, or `::alloc::boxed::Box` in no-std
+(see [Features](#features)); `box` overrides either, e.g. to point at a
+re-exported / custom `Box`:
+
+```rust,ignore
+#[derive(Clone, Arbitrary)]
+#[quickcheck(box = "my_crate::reexport::Box")]
+struct S { x: u32 }
 ```
 
 ---
@@ -256,6 +274,20 @@ The derive reports these as `compile_error!` with a focused span (covered by the
 - an unknown key in a container / field / variant `#[quickcheck(...)]`;
 - `default` together with `with` on the same field;
 - an `enum` whose every variant is `#[quickcheck(skip)]`.
+
+## Features
+
+This is a proc-macro crate; its features select what the generated `shrink`
+returns:
+
+- **`std`** (default) — `shrink` returns `::std::boxed::Box<dyn Iterator<…>>`.
+- **`alloc`** — for no-std consumers: `shrink` returns
+  `::alloc::boxed::Box<dyn Iterator<…>>` instead. Enable with
+  `default-features = false, features = ["alloc"]`.
+
+A container `#[quickcheck(box = "...")]` overrides the `Box` path regardless of
+feature. (Generation otherwise uses only `core` paths — `core::iter`,
+`core::clone::Clone`, `core::default::Default` — so the output is no-std-ready.)
 
 ## License
 

@@ -1,4 +1,4 @@
-error: unknown container attribute; expected `crate`, `bound`, `with`, or `shrink`
+error: unknown container attribute; expected `crate`, `bound`, `with`, `shrink`, or `box`
  --> tests/ui/unknown_container_attr.rs:4:14
   |
 4 | #[quickcheck(bogus = "x")]

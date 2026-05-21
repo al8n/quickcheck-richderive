@@ -43,13 +43,19 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
   // generated body (collision-free + `mixed_site`).
   let g = hyg.ident("__quickcheck_g");
 
+  // The `Box` type for `shrink`'s return: an explicit `box = "..."` override, or
+  // `::std::boxed::Box` (`std` feature) / `::alloc::boxed::Box` (no-std).
+  let box_ty = box_path(&container);
+
   let name = &input.ident;
   let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
   let where_clause = build_where_clause(&input, &container, &qc);
 
   let (arbitrary_body, shrink_body) = match &input.data {
-    Data::Struct(data) => codegen::struct_bodies(name, &data.fields, &container, &g, &hyg, &qc)?,
-    Data::Enum(data) => codegen::enum_bodies(name, data, &container, &g, &hyg, &qc)?,
+    Data::Struct(data) => {
+      codegen::struct_bodies(name, &data.fields, &container, &g, &hyg, &box_ty, &qc)?
+    }
+    Data::Enum(data) => codegen::enum_bodies(name, data, &container, &g, &hyg, &box_ty, &qc)?,
     Data::Union(_) => {
       return Err(Error::new_spanned(
         &input,
@@ -65,7 +71,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
           #arbitrary_body
         }
 
-        fn shrink(&self) -> ::std::boxed::Box<dyn ::std::iter::Iterator<Item = Self>> {
+        fn shrink(&self) -> #box_ty<dyn ::core::iter::Iterator<Item = Self>> {
           #shrink_body
         }
       }
@@ -73,14 +79,32 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
   })
 }
 
+/// The `Box` path for `shrink`'s return type: an explicit container
+/// `box = "..."`, else `::std::boxed::Box` (with the `std` feature) or
+/// `::alloc::boxed::Box` (no-std).
+fn box_path(container: &ContainerAttrs) -> Path {
+  if let Some(p) = &container.box_path {
+    p.clone()
+  } else if cfg!(feature = "std") {
+    syn::parse_quote!(::std::boxed::Box)
+  } else {
+    syn::parse_quote!(::alloc::boxed::Box)
+  }
+}
+
 /// Build the `where` clause for the impl.
 ///
 /// * If any container `bound` attr is present, the clause is the type's own
 ///   predicates plus exactly the parsed bound predicates (wholesale replacement
 ///   of inference).
-/// * Otherwise, infer `Param: #qc::Arbitrary` only for type params that are
-///   structurally used by a field actually generated via
-///   `<qc>::Arbitrary::arbitrary` (lifetimes and const params are never bounded).
+/// * Otherwise infer two kinds of predicate:
+///   - `T: Clone + 'static` for every generic **type** param, to satisfy the
+///     `Arbitrary: Clone + 'static` supertrait on `Self` (the type's own
+///     `Clone`/`'static` need it; a `<FieldTy>: Arbitrary` bound does *not* imply
+///     `T: Clone`); and
+///   - `<FieldTy>: #qc::Arbitrary` for each generated field type that mentions a
+///     generic param (sound for projections / nested generics — see
+///     [`inferred_bound_types`]).
 fn build_where_clause(input: &DeriveInput, container: &ContainerAttrs, qc: &Path) -> TokenStream2 {
   let mut predicates: Punctuated<WherePredicate, Token![,]> = input
     .generics
@@ -90,6 +114,10 @@ fn build_where_clause(input: &DeriveInput, container: &ContainerAttrs, qc: &Path
     .unwrap_or_default();
 
   if container.bounds.is_empty() {
+    for type_param in input.generics.type_params() {
+      let ident = &type_param.ident;
+      predicates.push(syn::parse_quote!(#ident: ::core::clone::Clone + 'static));
+    }
     for ty in inferred_bound_types(input, container) {
       predicates.push(syn::parse_quote!(#ty: #qc::Arbitrary));
     }
