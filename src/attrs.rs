@@ -15,9 +15,7 @@
 //! `with` is mutually exclusive with `arbitrary` and `shrink` — the compiler
 //! reports a focused error if both forms appear on the same item.
 
-use syn::{
-  Attribute, Error, Path, Token, WherePredicate, parse_str, punctuated::Punctuated,
-};
+use syn::{Attribute, Error, Path, Token, WherePredicate, parse_str, punctuated::Punctuated};
 
 /// Parse a string-literal value into a `syn::Path`, keeping the literal's span
 /// for error reporting.
@@ -171,9 +169,7 @@ impl FieldAttrs {
             ));
           }
           if out.default {
-            return Err(
-              meta.error("`with` and `default` are mutually exclusive on a field"),
-            );
+            return Err(meta.error("`with` and `default` are mutually exclusive on a field"));
           }
           let lit: syn::LitStr = meta.value()?.parse()?;
           out.with = Some(parse_path(&lit)?);
@@ -185,9 +181,7 @@ impl FieldAttrs {
             ));
           }
           if out.default {
-            return Err(
-              meta.error("`arbitrary` and `default` are mutually exclusive on a field"),
-            );
+            return Err(meta.error("`arbitrary` and `default` are mutually exclusive on a field"));
           }
           let lit: syn::LitStr = meta.value()?.parse()?;
           out.arbitrary = Some(parse_path(&lit)?);
@@ -202,9 +196,9 @@ impl FieldAttrs {
           out.shrink = Some(parse_path(&lit)?);
         } else if meta.path.is_ident("default") {
           if out.with.is_some() || out.arbitrary.is_some() {
-            return Err(meta.error(
-              "`default` is mutually exclusive with `with` and `arbitrary` on a field",
-            ));
+            return Err(
+              meta.error("`default` is mutually exclusive with `with` and `arbitrary` on a field"),
+            );
           }
           out.default = true;
         } else {
@@ -245,30 +239,22 @@ impl VariantAttrs {
           out.skip = true;
         } else if meta.path.is_ident("with") {
           if out.arbitrary.is_some() {
-            return Err(meta.error(
-              "`with` and `arbitrary` are mutually exclusive on a variant",
-            ));
+            return Err(meta.error("`with` and `arbitrary` are mutually exclusive on a variant"));
           }
           if out.shrink.is_some() {
-            return Err(
-              meta.error("`with` and `shrink` are mutually exclusive on a variant"),
-            );
+            return Err(meta.error("`with` and `shrink` are mutually exclusive on a variant"));
           }
           let lit: syn::LitStr = meta.value()?.parse()?;
           out.with = Some(parse_path(&lit)?);
         } else if meta.path.is_ident("arbitrary") {
           if out.with.is_some() {
-            return Err(meta.error(
-              "`arbitrary` and `with` are mutually exclusive on a variant",
-            ));
+            return Err(meta.error("`arbitrary` and `with` are mutually exclusive on a variant"));
           }
           let lit: syn::LitStr = meta.value()?.parse()?;
           out.arbitrary = Some(parse_path(&lit)?);
         } else if meta.path.is_ident("shrink") {
           if out.with.is_some() {
-            return Err(
-              meta.error("`shrink` and `with` are mutually exclusive on a variant"),
-            );
+            return Err(meta.error("`shrink` and `with` are mutually exclusive on a variant"));
           }
           let lit: syn::LitStr = meta.value()?.parse()?;
           out.shrink = Some(parse_path(&lit)?);
