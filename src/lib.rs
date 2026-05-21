@@ -1,23 +1,5 @@
-//! A `#[derive(Arbitrary)]` proc-macro that emits a **native**
-//! [`quickcheck::Arbitrary`] implementation — both `arbitrary` and a real
-//! `shrink` — for structs and enums.
-//!
-//! Unlike bridges that route generation through `arbitrary::Unstructured`
-//! byte buffers, this derive produces a genuine quickcheck impl that calls
-//! `Arbitrary::arbitrary` / `Arbitrary::shrink` directly on the fields.
-//!
-//! ```
-//! # use quickcheck_derive::Arbitrary;
-//! #[derive(Clone, Debug, Arbitrary)]
-//! struct Point {
-//!   x: i32,
-//!   y: i32,
-//! }
-//! ```
-//!
-//! See the crate `README.md` for the full attribute surface.
-
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![doc = include_str!("../README.md")]
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
