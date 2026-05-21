@@ -141,14 +141,13 @@ fn box_setup(
 /// * If any container `bound` attr is present, the clause is the type's own
 ///   predicates plus exactly the parsed bound predicates (wholesale replacement
 ///   of inference).
-/// * Otherwise infer two kinds of predicate:
-///   - `T: Clone + 'static` for every generic **type** param, to satisfy the
-///     `Arbitrary: Clone + 'static` supertrait on `Self` (the type's own
-///     `Clone`/`'static` need it; a `<FieldTy>: Arbitrary` bound does *not* imply
-///     `T: Clone`); and
-///   - `<FieldTy>: #qc::Arbitrary` for each generated field type that mentions a
-///     generic param (sound for projections / nested generics — see
-///     [`inferred_bound_types`]).
+/// * Otherwise infer three kinds of predicate:
+///   - `Self: Clone + 'static` (the `Arbitrary` supertrait obligation, stated
+///     exactly on the implementing type);
+///   - `<FieldTy>: #qc::Arbitrary` for each `Arbitrary`-generated field type that
+///     mentions a generic param (sound for projections / nested generics); and
+///   - `<FieldTy>: Default` for each `#[quickcheck(default)]` field type that
+///     mentions a generic param (the generated `Default::default()` needs it).
 fn build_where_clause(input: &DeriveInput, container: &ContainerAttrs, qc: &Path) -> TokenStream2 {
   let mut predicates: Punctuated<WherePredicate, Token![,]> = input
     .generics
@@ -165,8 +164,13 @@ fn build_where_clause(input: &DeriveInput, container: &ContainerAttrs, qc: &Path
     if !input.generics.params.is_empty() {
       predicates.push(syn::parse_quote!(Self: ::core::clone::Clone + 'static));
     }
-    for ty in inferred_bound_types(input, container) {
+    // Inline-generated fields call `Arbitrary::arbitrary`; `default` fields call
+    // `Default::default()`. Bound each accordingly.
+    for ty in inferred_field_types(input, container, |a| a.with.is_none() && !a.default) {
       predicates.push(syn::parse_quote!(#ty: #qc::Arbitrary));
+    }
+    for ty in inferred_field_types(input, container, |a| a.default) {
+      predicates.push(syn::parse_quote!(#ty: ::core::default::Default));
     }
   } else {
     for predicate in &container.bounds {
@@ -196,11 +200,20 @@ fn build_where_clause(input: &DeriveInput, container: &ContainerAttrs, qc: &Path
 /// generic **type or const** param — so const-generic-bearing field types
 /// (`Only<N>`, `[u8; N]`) are bounded too, not just type-param ones.
 ///
+/// `select` picks which fields contribute (by their parsed attrs), so the same
+/// walk serves both the `Arbitrary` and the `Default` bound passes. Only fields
+/// generated inline contribute: nothing under a container `with`, and for enums
+/// only non-`skip` variants without a variant `with`.
+///
 /// Deduplicated, in first-seen order. Parse errors are ignored here — they are
 /// surfaced by [`validate_all_attrs`] / codegen, so this best-effort inference
 /// simply contributes nothing for an unparsable field.
-fn inferred_bound_types(input: &DeriveInput, container: &ContainerAttrs) -> Vec<Type> {
-  // Generic type *and* const params (lifetimes never need an `Arbitrary` bound).
+fn inferred_field_types(
+  input: &DeriveInput,
+  container: &ContainerAttrs,
+  select: fn(&FieldAttrs) -> bool,
+) -> Vec<Type> {
+  // Generic type *and* const params (lifetimes never need a bound here).
   let param_idents: Vec<Ident> = input
     .generics
     .type_params()
@@ -211,13 +224,12 @@ fn inferred_bound_types(input: &DeriveInput, container: &ContainerAttrs) -> Vec<
     return Vec::new();
   }
 
-  // Collect the `syn::Type`s of every field that is generated via `arbitrary`.
-  let mut generated_tys: Vec<Type> = Vec::new();
+  let mut tys: Vec<Type> = Vec::new();
 
-  // A container `with` builds the whole value itself ⇒ no field uses `arbitrary`.
+  // A container `with` builds the whole value itself ⇒ no field is generated.
   if container.with.is_none() {
     match &input.data {
-      Data::Struct(data) => collect_arbitrary_field_types(&data.fields, &mut generated_tys),
+      Data::Struct(data) => collect_field_types(&data.fields, select, &mut tys),
       Data::Enum(data) => {
         for variant in &data.variants {
           let vattrs = match VariantAttrs::parse(&variant.attrs) {
@@ -229,7 +241,7 @@ fn inferred_bound_types(input: &DeriveInput, container: &ContainerAttrs) -> Vec<
           if vattrs.skip || vattrs.with.is_some() {
             continue;
           }
-          collect_arbitrary_field_types(&variant.fields, &mut generated_tys);
+          collect_field_types(&variant.fields, select, &mut tys);
         }
       }
       Data::Union(_) => {}
@@ -237,22 +249,22 @@ fn inferred_bound_types(input: &DeriveInput, container: &ContainerAttrs) -> Vec<
   }
 
   let mut seen = std::collections::HashSet::new();
-  generated_tys
+  tys
     .into_iter()
     .filter(|ty| param_idents.iter().any(|p| type_uses_param(ty, p)))
     .filter(|ty| seen.insert(quote!(#ty).to_string()))
     .collect()
 }
 
-/// Push the `syn::Type` of each field in `fields` that is generated via
-/// `Arbitrary::arbitrary` (i.e. no field `with` and not `default`).
-fn collect_arbitrary_field_types(fields: &syn::Fields, out: &mut Vec<Type>) {
+/// Push the `syn::Type` of each field in `fields` whose parsed attrs satisfy
+/// `select`.
+fn collect_field_types(fields: &syn::Fields, select: fn(&FieldAttrs) -> bool, out: &mut Vec<Type>) {
   for field in fields.iter() {
     let attrs = match FieldAttrs::parse(&field.attrs) {
       Ok(a) => a,
       Err(_) => continue,
     };
-    if attrs.with.is_none() && !attrs.default {
+    if select(&attrs) {
       out.push(field.ty.clone());
     }
   }

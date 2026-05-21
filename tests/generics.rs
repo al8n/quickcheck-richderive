@@ -290,3 +290,21 @@ fn lifetime_generic_static() {
   let mut g = gen();
   let _v: WithLt<'static> = WithLt::arbitrary(&mut g);
 }
+
+// A generic `#[quickcheck(default)]` field gets an inferred `<FieldTy>: Default`
+// (round-12): the generated `Default::default()` for `d: T` needs `T: Default`,
+// which inference now supplies.
+#[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
+struct GenericDefault<T> {
+  #[quickcheck(default)]
+  d: T,
+  n: u8,
+}
+
+#[test]
+fn generic_default_field_infers_default_bound() {
+  let mut g = gen();
+  let v: GenericDefault<u32> = GenericDefault::arbitrary(&mut g);
+  assert_eq!(v.d, 0); // u32::default()
+  let _shrinks: Vec<GenericDefault<u32>> = v.shrink().collect();
+}
