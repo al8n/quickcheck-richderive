@@ -1,0 +1,5 @@
+error: `shrink` and `with` are mutually exclusive on a container — `with = "mod"` already provides `shrink` via `mod::shrink`
+ --> tests/ui/container_with_and_shrink.rs:4:26
+  |
+4 | #[quickcheck(with = "m", shrink = "s")]
+  |                          ^^^^^^

@@ -1,5 +1,5 @@
-error: `default` and `with` are mutually exclusive on a field
- --> tests/ui/variant_with_conflicting_field.rs:9:5
+error: `with` and `default` are mutually exclusive on a field
+ --> tests/ui/variant_with_conflicting_field.rs:9:27
   |
 9 |     #[quickcheck(default, with = "x")]
-  |     ^
+  |                           ^^^^

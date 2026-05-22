@@ -147,7 +147,7 @@ fn make_notarb(_g: &mut Gen) -> NotArb {
 
 #[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
 struct FieldWith {
-  #[quickcheck(with = "make_notarb")]
+  #[quickcheck(arbitrary = "make_notarb")]
   inner: NotArb,
   x: u8,
 }

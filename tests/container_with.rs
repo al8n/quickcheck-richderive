@@ -20,7 +20,7 @@ fn shrink_whole(value: &Whole) -> Box<dyn Iterator<Item = Whole>> {
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
-#[quickcheck(with = "build_whole", shrink = "shrink_whole")]
+#[quickcheck(arbitrary = "build_whole", shrink = "shrink_whole")]
 struct Whole {
   a: u32,
   b: u32,
@@ -43,7 +43,7 @@ fn build_only(_g: &mut Gen) -> OnlyWith {
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
-#[quickcheck(with = "build_only")]
+#[quickcheck(arbitrary = "build_only")]
 struct OnlyWith(u8);
 
 #[test]

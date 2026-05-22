@@ -165,8 +165,11 @@ fn build_where_clause(input: &DeriveInput, container: &ContainerAttrs, qc: &Path
       predicates.push(syn::parse_quote!(Self: ::core::clone::Clone + 'static));
     }
     // Inline-generated fields call `Arbitrary::arbitrary`; `default` fields call
-    // `Default::default()`. Bound each accordingly.
-    for ty in inferred_field_types(input, container, |a| a.with.is_none() && !a.default) {
+    // `Default::default()`. `with`/`arbitrary` fields call user code instead, so
+    // they need neither bound. Bound each accordingly.
+    for ty in inferred_field_types(input, container, |a| {
+      a.with.is_none() && a.arbitrary.is_none() && !a.default
+    }) {
       predicates.push(syn::parse_quote!(#ty: #qc::Arbitrary));
     }
     for ty in inferred_field_types(input, container, |a| a.default) {
@@ -226,8 +229,9 @@ fn inferred_field_types(
 
   let mut tys: Vec<Type> = Vec::new();
 
-  // A container `with` builds the whole value itself ⇒ no field is generated.
-  if container.with.is_none() {
+  // A container `with`/`arbitrary` builds the whole value itself ⇒ no field is
+  // generated.
+  if container.with.is_none() && container.arbitrary.is_none() {
     match &input.data {
       Data::Struct(data) => collect_field_types(&data.fields, select, &mut tys),
       Data::Enum(data) => {
@@ -236,9 +240,9 @@ fn inferred_field_types(
             Ok(v) => v,
             Err(_) => continue,
           };
-          // `skip` variants are never generated; variant `with` builds the
-          // whole value ⇒ neither contributes field bounds.
-          if vattrs.skip || vattrs.with.is_some() {
+          // `skip` variants are never generated; a variant `with`/`arbitrary`
+          // builds the whole value ⇒ none contribute field bounds.
+          if vattrs.skip || vattrs.with.is_some() || vattrs.arbitrary.is_some() {
             continue;
           }
           collect_field_types(&variant.fields, select, &mut tys);

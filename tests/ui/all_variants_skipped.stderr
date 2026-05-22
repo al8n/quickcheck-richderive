@@ -1,5 +1,5 @@
 error: all enum variants are `#[quickcheck(skip)]`; `arbitrary` cannot pick a variant
- --> tests/ui/all_variants_skipped.rs:5:3
+ --> tests/ui/all_variants_skipped.rs:6:3
   |
-5 |   #[quickcheck(skip)]
+6 |   A,
   |   ^

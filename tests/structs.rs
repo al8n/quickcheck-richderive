@@ -115,7 +115,7 @@ fn shrink_to_zero(value: &u32) -> Box<dyn Iterator<Item = u32>> {
 
 #[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
 struct CustomField {
-  #[quickcheck(with = "make_seven", shrink = "shrink_to_zero")]
+  #[quickcheck(arbitrary = "make_seven", shrink = "shrink_to_zero")]
   x: u32,
   y: u8,
 }
@@ -142,7 +142,7 @@ fn field_with_and_shrink_are_used() {
 
 #[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
 struct WithNoShrink {
-  #[quickcheck(with = "make_seven")]
+  #[quickcheck(arbitrary = "make_seven")]
   x: u32,
   y: u8,
 }

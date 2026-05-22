@@ -111,7 +111,7 @@ fn shrink_special(value: &Decorated) -> Box<dyn Iterator<Item = Decorated>> {
 #[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
 enum Decorated {
   Plain(u8),
-  #[quickcheck(with = "make_special", shrink = "shrink_special")]
+  #[quickcheck(arbitrary = "make_special", shrink = "shrink_special")]
   Special(u32),
 }
 
@@ -141,7 +141,7 @@ fn build_combo(_g: &mut Gen) -> Combo {
 #[derive(Clone, Debug, PartialEq, DeriveArbitrary)]
 enum Combo {
   // Variant `with` present, no variant `shrink` => generation via fn, shrink empty.
-  #[quickcheck(with = "build_combo")]
+  #[quickcheck(arbitrary = "build_combo")]
   Made {
     x: u8,
     // Field attrs here must be ignored because variant `with` takes precedence.

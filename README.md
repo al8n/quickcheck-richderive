@@ -71,8 +71,9 @@ each enum **variant**.
 |-----------|---------|
 | [`crate = "..."`](#crate--pathtoquickcheck) | Base path for the emitted `Arbitrary` / `Gen`. Default `::quickcheck`. |
 | [`bound = "..."`](#bound--p-bound-q-other-repeatable) | **Repeatable.** Replaces the inferred generic bounds. |
-| [`with = "..."`](#container-with--shrink) | Generate the whole value via a function. |
-| [`shrink = "..."`](#container-with--shrink) | Shrink the whole value via a function. |
+| [`with = "mod"`](#container-with--arbitrary--shrink) | A **module** exporting both `mod::arbitrary` and `mod::shrink` — overrides both halves at once. Serde-style. |
+| [`arbitrary = "fn"`](#container-with--arbitrary--shrink) | Generate the whole value via this function. |
+| [`shrink = "fn"`](#container-with--arbitrary--shrink) | Shrink the whole value via this function. |
 | [`box = "..."`](#box--pathtobox) | Override the `Box` type used in the `shrink` return. |
 
 #### `crate = "path::to::quickcheck"`
@@ -136,35 +137,70 @@ struct Defaulted<T> {
 > keep `: Clone + 'static`. The inference is dropped wholesale, so an incomplete
 > custom bound will fail to compile.
 
-#### Container `with` / `shrink`
+#### Container `with` / `arbitrary` / `shrink`
 
-Override generation and/or shrinking of the **whole** value with free functions:
+Override generation and/or shrinking of the **whole** value. Three knobs,
+mirroring serde's `serialize_with` / `deserialize_with` / `with` triad:
 
-| Attribute | Signature |
-|-----------|-----------|
-| `with = "f"` | `fn(g: &mut Gen) -> Self` |
-| `shrink = "s"` | `fn(v: &Self) -> Box<dyn Iterator<Item = Self>>` |
+| Attribute | Value | Signature(s) the consumer must export |
+|-----------|-------|---------------------------------------|
+| `with = "mod"` | a **module** | `fn arbitrary(g: &mut Gen) -> Self` **and** `fn shrink(v: &Self) -> Box<dyn Iterator<Item = Self>>` |
+| `arbitrary = "fn"` | a **function** | `fn(g: &mut Gen) -> Self` |
+| `shrink = "fn"` | a **function** | `fn(v: &Self) -> Box<dyn Iterator<Item = Self>>` |
 
-The two are independent: `with` without `shrink` ⇒ `shrink` is empty; `shrink`
-without `with` ⇒ generation is still field/variant-derived.
+`with` bundles both halves through one module; `arbitrary` and `shrink` are the
+per-direction overrides. `with` is **mutually exclusive** with both `arbitrary`
+and `shrink` (compile error). Defaults that kick in when an attribute is absent:
 
-This is the idiomatic way to support **types with invariants** — generate only
-valid values by routing through a checked constructor, instead of field-by-field:
+- `with = "mod"` alone: both halves come from the module.
+- `arbitrary = "fn"` alone: gen uses `fn`; **shrink is empty** (no shrink route).
+- `shrink = "fn"` alone: gen is still field/variant-derived; shrink uses `fn`.
+- `arbitrary = "fn"` + `shrink = "fn"`: each direction from its own function.
+
+##### `with = "mod"` — module pair (serde-style)
 
 ```rust,ignore
-use quickcheck::Gen;
-
 #[derive(Clone, Arbitrary)]
-#[quickcheck(with = "gen_geo")]
+#[quickcheck(with = "geo_helpers")]
+struct GeoLocation { /* private, range-checked fields */ }
+
+mod geo_helpers {
+    use super::GeoLocation;
+    use quickcheck::Gen;
+
+    pub fn arbitrary(g: &mut Gen) -> GeoLocation {
+        let lat = (i64::arbitrary(g) % 9_001) as f64 / 100.0;   // [-90, 90]
+        let lon = (i64::arbitrary(g) % 18_001) as f64 / 100.0;  // [-180, 180]
+        GeoLocation::try_new(lat, lon, None).unwrap()
+    }
+
+    pub fn shrink(v: &GeoLocation) -> Box<dyn Iterator<Item = GeoLocation>> {
+        // …whatever shrink strategy makes sense for the validated invariants
+        Box::new(std::iter::empty())
+    }
+}
+```
+
+##### `arbitrary = "fn"` — single-fn gen, no shrink
+
+When the type has no useful shrink and you only need to override generation:
+
+```rust,ignore
+#[derive(Clone, Arbitrary)]
+#[quickcheck(arbitrary = "gen_geo")]
 struct GeoLocation { /* private, range-checked fields */ }
 
 fn gen_geo(g: &mut Gen) -> GeoLocation {
-    // produce in-range inputs, then go through the validating constructor
-    let lat = (i64::arbitrary(g) % 9_001) as f64 / 100.0; // [-90, 90]
-    let lon = (i64::arbitrary(g) % 18_001) as f64 / 100.0; // [-180, 180]
+    let lat = (i64::arbitrary(g) % 9_001) as f64 / 100.0;
+    let lon = (i64::arbitrary(g) % 18_001) as f64 / 100.0;
     GeoLocation::try_new(lat, lon, None).unwrap()
 }
 ```
+
+##### `shrink = "fn"` — single-fn shrink, field-derived gen
+
+Useful when the field-by-field default gen is fine but you want a smarter
+shrink strategy.
 
 #### `box = "path::to::Box"`
 
@@ -191,27 +227,31 @@ struct S { x: u32 }
 
 ### Field attributes (struct fields, and fields of struct/tuple variants)
 
-| Attribute | Meaning |
-|-----------|---------|
-| `with = "f"` | Generate this field via `fn(g: &mut Gen) -> FieldT`. |
-| `shrink = "s"` | Shrink this field via `fn(v: &FieldT) -> Box<dyn Iterator<Item = FieldT>>`. |
-| `default` | Generate via `Default::default()`; the field is **held constant** when shrinking. |
+| Attribute | Value | Effect |
+|-----------|-------|--------|
+| `with = "mod"` | a module | `mod::arbitrary(g: &mut Gen) -> FieldT` + `mod::shrink(v: &FieldT) -> Box<dyn Iterator<Item = FieldT>>` |
+| `arbitrary = "fn"` | a function | `fn(g: &mut Gen) -> FieldT` — gen half only |
+| `shrink = "fn"` | a function | `fn(v: &FieldT) -> Box<dyn Iterator<Item = FieldT>>` — shrink half only |
+| `default` | — | Generate via `Default::default()`; the field is **held constant** when shrinking. |
 
-`with` and `default` are **mutually exclusive** on the same field (compile
-error). The per-field shrink rule:
+`with` is mutually exclusive with `arbitrary` and `shrink`. `default` is mutually
+exclusive with `with` and `arbitrary`. The per-field shrink rule:
 
-- `shrink = "s"` → use `s`;
+- `with = "mod"` → use `mod::shrink`;
+- `shrink = "fn"` → use `fn`;
 - plain field → `quickcheck::Arbitrary::shrink`;
-- `with`-without-`shrink`, or `default` → **held constant** (never shrunk).
+- `arbitrary = "fn"`-without-`shrink`, or `default` → **held constant** (never shrunk).
 
 ```rust,ignore
-use quickcheck::Gen;
-
 #[derive(Clone, Arbitrary)]
 struct Packet {
-    // custom generator + custom shrinker for a foreign / unsupported type
-    #[quickcheck(with = "gen_id", shrink = "shrink_id")]
+    // serde-style pair: one module provides both halves
+    #[quickcheck(with = "foreign_id_helpers")]
     id: ForeignId,
+
+    // single-fn forms — useful when you only need one direction
+    #[quickcheck(arbitrary = "gen_other", shrink = "shrink_other")]
+    other: ForeignOther,
 
     // never generated from `g`; always `Default::default()`, never shrunk
     #[quickcheck(default)]
@@ -221,9 +261,14 @@ struct Packet {
     payload: Vec<u8>,
 }
 
-fn gen_id(g: &mut Gen) -> ForeignId { ForeignId::new(u32::arbitrary(g)) }
-fn shrink_id(v: &ForeignId) -> Box<dyn Iterator<Item = ForeignId>> {
-    Box::new(v.as_u32().shrink().map(ForeignId::new))
+mod foreign_id_helpers {
+    use quickcheck::Gen;
+    use super::ForeignId;
+
+    pub fn arbitrary(g: &mut Gen) -> ForeignId { ForeignId::new(u32::arbitrary(g)) }
+    pub fn shrink(v: &ForeignId) -> Box<dyn Iterator<Item = ForeignId>> {
+        Box::new(v.as_u32().shrink().map(ForeignId::new))
+    }
 }
 ```
 
@@ -231,43 +276,49 @@ fn shrink_id(v: &ForeignId) -> Box<dyn Iterator<Item = ForeignId>> {
 
 ### Variant attributes (enum variants)
 
-| Attribute | Meaning |
-|-----------|---------|
-| `skip` | Exclude from `arbitrary` selection. A value that *is* this variant shrinks to empty. If **every** variant is `skip`, a `compile_error!` is produced. |
-| `with = "f"` | Generate the whole `Self` value as this variant: `fn(g: &mut Gen) -> Self`. **Takes precedence** over the variant's field attributes. |
-| `shrink = "s"` | Shrink a value of this variant: `fn(v: &Self) -> Box<dyn Iterator<Item = Self>>`. `with`-without-`shrink` ⇒ empty for that variant. |
+| Attribute | Value | Effect |
+|-----------|-------|--------|
+| `skip` | — | Exclude from `arbitrary` selection. A value that *is* this variant shrinks to empty. If **every** variant is `skip`, a `compile_error!` is produced. |
+| `with = "mod"` | a module | `mod::arbitrary(g: &mut Gen) -> Self` (yielding this variant) + `mod::shrink(v: &Self) -> Box<dyn Iterator<Item = Self>>` |
+| `arbitrary = "fn"` | a function | Generate the whole `Self` value as this variant: `fn(g: &mut Gen) -> Self`. Takes precedence over the variant's field attributes. |
+| `shrink = "fn"` | a function | Shrink a value of this variant: `fn(v: &Self) -> Box<dyn Iterator<Item = Self>>`. `arbitrary`-without-`shrink` ⇒ empty for that variant. |
 
 `arbitrary` picks **uniformly** among the non-skipped variants via `g.choose`.
-Variants without a variant-level `with` are generated field-by-field, and their
-fields accept the field attributes above (named and tuple variants alike).
+Variants without a variant-level `with` or `arbitrary` are generated
+field-by-field; their fields accept the field attributes above. The same
+mutual-exclusion rules as the container apply (`with` vs `arbitrary`/`shrink`).
 
 ```rust,ignore
-use quickcheck::Gen;
-
 #[derive(Clone, Arbitrary)]
 enum Event {
-    // never produced by `arbitrary`
     #[quickcheck(skip)]
     Internal,
 
-    // unit + field-derived variants
     Tick,
     Resize { width: u32, height: u32 },
 
-    // whole-variant override
-    #[quickcheck(with = "gen_custom", shrink = "shrink_custom")]
+    // serde-style pair on a variant
+    #[quickcheck(with = "custom_helpers")]
     Custom(Payload),
+
+    // single-fn forms
+    #[quickcheck(arbitrary = "gen_special")]
+    Special(u32),
 
     // per-field attributes inside a variant
     Frame {
-        #[quickcheck(with = "gen_pixels")]
+        #[quickcheck(arbitrary = "gen_pixels")]
         pixels: Pixels,
         index: u64,
     },
 }
 
-fn gen_custom(g: &mut Gen) -> Event { Event::Custom(Payload::arbitrary(g)) }
-fn shrink_custom(v: &Event) -> Box<dyn Iterator<Item = Event>> { Box::new(std::iter::empty()) }
+mod custom_helpers {
+    use super::*;
+    pub fn arbitrary(g: &mut Gen) -> Event { Event::Custom(Payload::arbitrary(g)) }
+    pub fn shrink(_v: &Event) -> Box<dyn Iterator<Item = Event>> { Box::new(std::iter::empty()) }
+}
+fn gen_special(g: &mut Gen) -> Event { Event::Special(u32::arbitrary(g)) }
 fn gen_pixels(g: &mut Gen) -> Pixels { Pixels::arbitrary(g) }
 ```
 
@@ -293,7 +344,10 @@ The derive reports these as `compile_error!` with a focused span (covered by the
 
 - a `union` target (`derive(Arbitrary)` supports only structs and enums);
 - an unknown key in a container / field / variant `#[quickcheck(...)]`;
-- `default` together with `with` on the same field;
+- `with` together with `arbitrary` on the same item (`with = "mod"` already
+  provides `arbitrary` via `mod::arbitrary`);
+- `with` together with `shrink` on the same item (same reasoning);
+- `default` together with `with` or `arbitrary` on the same field;
 - an `enum` whose every variant is `#[quickcheck(skip)]`.
 
 ## Features
@@ -325,8 +379,9 @@ output is no-std-ready.
 - **`#[repr(packed)]` structs are not supported.** The field-derived `shrink`
   borrows fields (`&self.field`), which is invalid for a packed layout (rustc
   `error[E0793]: reference to packed field is unaligned`). Use a non-packed type,
-  or override generation/shrinking with `#[quickcheck(with = "...", shrink =
-  "...")]`.
+  or skip the field-derived path entirely — either with `#[quickcheck(with =
+  "module")]` where the module exports both `arbitrary` and `shrink`, or with
+  paired `#[quickcheck(arbitrary = "fn", shrink = "fn")]` overrides.
 - **Edition 2018 or later** is required by consumers. The generated code uses
   absolute `::core` paths, which edition 2015 does not have in the crate root
   (it would need `extern crate core;`). Editions 2018 and 2021 are unaffected.

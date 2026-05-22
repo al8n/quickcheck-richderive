@@ -1,0 +1,5 @@
+error: `arbitrary` and `with` are mutually exclusive on a container — `with = "mod"` already provides `arbitrary` via `mod::arbitrary`
+ --> tests/ui/container_with_and_arbitrary.rs:4:26
+  |
+4 | #[quickcheck(with = "m", arbitrary = "f")]
+  |                          ^^^^^^^^^

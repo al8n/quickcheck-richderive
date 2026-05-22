@@ -1,4 +1,4 @@
-error: unknown variant attribute; expected `skip`, `with`, or `shrink`
+error: unknown variant attribute; expected `skip`, `with`, `arbitrary`, or `shrink`
  --> tests/ui/unknown_variant_attr.rs:5:16
   |
 5 |   #[quickcheck(bogus)]
