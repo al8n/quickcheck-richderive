@@ -1,9 +1,9 @@
 //! Parser for `#[quickcheck_richderive::quickcheck(...)]` attribute arguments.
 //!
-//! The attribute accepts a comma-separated list of `key = value` pairs. Four
-//! keys are *reserved* for runner configuration; every other identifier is
-//! interpreted as a **per-argument generator override** whose name must match
-//! a parameter in the annotated function's signature.
+//! The attribute accepts a comma-separated list of `key = value` pairs. Five
+//! keys are recognised; every other identifier is rejected. Per-argument
+//! generator overrides live on the **fn parameters** via `#[strategy(path)]`,
+//! not in this attribute — they are parsed by the codegen step.
 //!
 //! | Key | Type | Notes |
 //! |---|---|---|
@@ -11,39 +11,23 @@
 //! | `max_tests = N`          | `u64` literal   | `.max_tests(N)` (discard cap) |
 //! | `gen_size = N`           | `usize` literal | `Gen::new(N)` |
 //! | `min_tests_passed = N`   | `u64` literal   | omitted if unset |
-//! | `<arg_ident> = "path"`   | path string     | `fn(&mut Gen) -> ArgType` |
+//! | `crate = "path"`         | path string     | base path for `Arbitrary`/`Gen`/`QuickCheck`/`TestResult` (default `::quickcheck`) |
 //!
-//! Validation against the user's fn signature (i.e. checking each override
-//! identifier actually names a parameter) happens later in the expansion stage
-//! — `parse` only enforces shape.
+//! Per-argument generator overrides have moved to `#[strategy(path)]` on each
+//! fn argument, parsed in the codegen stage.
 
 use std::collections::HashSet;
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use syn::{
-  Error, Ident, LitInt, LitStr, Path, Token, parse::Parse, parse::ParseStream, parse_str,
+  Error, Ident, LitInt, LitStr, Path, Token,
+  ext::IdentExt,
+  parse::{Parse, ParseStream},
+  parse_str,
   punctuated::Punctuated,
 };
 
-/// A parsed per-argument generator override: `<arg_ident> = "path::to::fn"`.
-pub(crate) struct ArgOverride {
-  /// The argument identifier (must match a parameter name on the user fn).
-  pub(crate) arg: Ident,
-  /// The path to the generator function. Signature: `fn(&mut Gen) -> ArgType`.
-  pub(crate) path: Path,
-}
-
 /// Fully-parsed attribute arguments, post-shape-check.
-///
-/// Field-validation responsibilities split between this struct and the
-/// expansion stage:
-///
-/// * **Here:** literal kinds and integer parsing (`cases = "100"` is a shape
-///   error caught here); duplicate keys (caught here); unknown reserved-shaped
-///   keys are NOT rejected here — any non-reserved ident is admitted as a
-///   per-arg override.
-/// * **Expansion:** matching each `ArgOverride.arg` to a real fn parameter,
-///   rejecting overrides naming nonexistent params.
 pub(crate) struct TestAttrArgs {
   /// `cases = N` — `.tests(N)`. Default `100`.
   pub(crate) cases: u64,
@@ -53,8 +37,9 @@ pub(crate) struct TestAttrArgs {
   pub(crate) gen_size: usize,
   /// `min_tests_passed = N` — `.min_tests_passed(N)`. `None` ⇒ omit the call.
   pub(crate) min_tests_passed: Option<u64>,
-  /// Per-arg generator overrides. Order preserved as written.
-  pub(crate) arg_overrides: Vec<ArgOverride>,
+  /// `crate = "path"` — base path for `Arbitrary` / `Gen` / `QuickCheck` /
+  /// `TestResult` and the injected `prop_assert!` macros. Default `::quickcheck`.
+  pub(crate) krate: Option<Path>,
 }
 
 impl Default for TestAttrArgs {
@@ -66,7 +51,7 @@ impl Default for TestAttrArgs {
       max_tests: 10_000,
       gen_size: 100,
       min_tests_passed: None,
-      arg_overrides: Vec::new(),
+      krate: None,
     }
   }
 }
@@ -80,14 +65,22 @@ impl TestAttrArgs {
     }
     syn::parse2::<Self>(tokens)
   }
+
+  /// The resolved quickcheck base path (default `::quickcheck`).
+  pub(crate) fn crate_path(&self) -> Path {
+    self
+      .krate
+      .clone()
+      .unwrap_or_else(|| syn::parse_quote!(::quickcheck))
+  }
 }
 
 impl Parse for TestAttrArgs {
   fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
     let mut out = TestAttrArgs::default();
     // Track which keys we've already seen, by ident name. A duplicate of any
-    // key — reserved or per-arg — is an error at the *second* occurrence's
-    // span (the first is the authoritative value, conceptually).
+    // key is an error at the *second* occurrence's span (the first is the
+    // authoritative value, conceptually).
     let mut seen: HashSet<String> = HashSet::new();
 
     // Parse `key = value, key = value, ...` until exhaustion. A trailing
@@ -110,27 +103,21 @@ impl Parse for TestAttrArgs {
         "min_tests_passed" => {
           out.min_tests_passed = Some(parse_u64(&entry, "min_tests_passed")?);
         }
-        // Common typo for a reserved key — fail loudly rather than silently
-        // accepting it as a per-arg override and confusing the user.
-        "case" | "test" | "tests" | "size" | "seed" => {
+        "crate" => out.krate = Some(expect_path_string(&entry, "crate")?),
+        // Any non-reserved key is a user error — per-arg overrides are no
+        // longer recognised here (they live on the fn args as
+        // `#[strategy(...)]`). Surface a focused, actionable diagnostic.
+        _ => {
           return Err(Error::new(
             entry.key.span(),
             format!(
               "unknown key `{key_str}` in #[quickcheck_richderive::quickcheck(...)]; \
-               did you mean one of `cases`, `max_tests`, `gen_size`, `min_tests_passed`? \
-               (note: deterministic seeding via `seed` is not supported by upstream \
-               `quickcheck`; see the README's reference table)"
+               expected one of `cases`, `max_tests`, `gen_size`, `min_tests_passed`, or \
+               `crate`. For a per-argument generator, attach `#[strategy(path)]` to the \
+               fn parameter instead. (Note: deterministic seeding via `seed` is not \
+               supported by upstream `quickcheck`; see the README's reference table.)"
             ),
           ));
-        }
-        // Otherwise: per-arg generator override. Value must be a string
-        // literal carrying a syntactically valid `syn::Path`.
-        _ => {
-          let path = expect_path_string(&entry, &key_str)?;
-          out.arg_overrides.push(ArgOverride {
-            arg: entry.key,
-            path,
-          });
         }
       }
     }
@@ -149,7 +136,10 @@ struct KvEntry {
 
 impl Parse for KvEntry {
   fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-    let key: Ident = input.parse()?;
+    // `parse_any` accepts raw and keyword identifiers — in particular `crate`,
+    // which is a reserved word but a valid attribute key (matching the
+    // derive's `#[quickcheck(crate = "...")]` convention).
+    let key: Ident = Ident::parse_any(input)?;
     let _eq: Token![=] = input.parse()?;
     let value: KvValue = input.parse()?;
     Ok(Self { key, value })
@@ -158,7 +148,7 @@ impl Parse for KvEntry {
 
 /// The right-hand side of a `key = value` entry. We accept exactly two value
 /// shapes: integer literals (for runner-config keys) and string literals (for
-/// per-arg override paths). Mismatches are reported at the value's span by
+/// the `crate` path). Mismatches are reported at the value's span by
 /// `parse_u64` / `parse_usize` / `expect_path_string`.
 enum KvValue {
   Int(LitInt),
@@ -189,12 +179,9 @@ impl Parse for KvValue {
 
 fn parse_u64(entry: &KvEntry, key: &str) -> syn::Result<u64> {
   match &entry.value {
-    KvValue::Int(lit) => lit.base10_parse::<u64>().map_err(|e| {
-      Error::new(
-        lit.span(),
-        format!("`{key}` must fit in `u64`: {e}"),
-      )
-    }),
+    KvValue::Int(lit) => lit
+      .base10_parse::<u64>()
+      .map_err(|e| Error::new(lit.span(), format!("`{key}` must fit in `u64`: {e}"))),
     KvValue::Str(_) => Err(Error::new(
       entry.value.span(),
       format!("`{key}` expects an integer literal, not a string"),
@@ -204,12 +191,9 @@ fn parse_u64(entry: &KvEntry, key: &str) -> syn::Result<u64> {
 
 fn parse_usize(entry: &KvEntry, key: &str) -> syn::Result<usize> {
   match &entry.value {
-    KvValue::Int(lit) => lit.base10_parse::<usize>().map_err(|e| {
-      Error::new(
-        lit.span(),
-        format!("`{key}` must fit in `usize`: {e}"),
-      )
-    }),
+    KvValue::Int(lit) => lit
+      .base10_parse::<usize>()
+      .map_err(|e| Error::new(lit.span(), format!("`{key}` must fit in `usize`: {e}"))),
     KvValue::Str(_) => Err(Error::new(
       entry.value.span(),
       format!("`{key}` expects an integer literal, not a string"),
@@ -217,28 +201,17 @@ fn parse_usize(entry: &KvEntry, key: &str) -> syn::Result<usize> {
   }
 }
 
-/// Per-arg overrides expect a *string literal* carrying a `syn::Path` —
-/// matching the existing `#[quickcheck(arbitrary = "path")]` convention on the
-/// derive. An integer literal here is a shape mismatch.
+/// `crate = "..."` expects a *string literal* carrying a `syn::Path` —
+/// matching the derive's `#[quickcheck(crate = "...")]` convention.
 fn expect_path_string(entry: &KvEntry, key: &str) -> syn::Result<Path> {
   let lit = match &entry.value {
     KvValue::Str(lit) => lit,
     KvValue::Int(_) => {
-      // Most likely cause: the user mistyped a reserved-config key (e.g.
-      // `cass` instead of `cases`), so admit-as-override then this branch
-      // catches the integer literal at the value-shape level. Hint
-      // accordingly.
       return Err(Error::new(
         entry.value.span(),
-        format!(
-          "`{key}` is interpreted as a per-arg generator override, which expects a \
-           string literal path (e.g. `{key} = \"my::gen\"`); \
-           if you meant a runner-config key, the supported ones are \
-           `cases`, `max_tests`, `gen_size`, and `min_tests_passed`"
-        ),
+        format!("`{key}` expects a string literal path (e.g. `{key} = \"::quickcheck\"`)"),
       ));
     }
   };
   parse_str::<Path>(&lit.value()).map_err(|e| Error::new(lit.span(), e))
 }
-

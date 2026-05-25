@@ -1,5 +1,0 @@
-error: `z` is not a parameter of this function — per-arg overrides must name one of the fn's positional arguments
- --> tests/ui/test_attr_override_unknown_arg.rs:7:14
-  |
-7 | #[quickcheck(z = "my_gen")]
-  |              ^

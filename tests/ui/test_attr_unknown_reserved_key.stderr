@@ -1,4 +1,4 @@
-error: unknown key `case` in #[quickcheck_richderive::quickcheck(...)]; did you mean one of `cases`, `max_tests`, `gen_size`, `min_tests_passed`? (note: deterministic seeding via `seed` is not supported by upstream `quickcheck`; see the README's reference table)
+error: unknown key `case` in #[quickcheck_richderive::quickcheck(...)]; expected one of `cases`, `max_tests`, `gen_size`, `min_tests_passed`, or `crate`. For a per-argument generator, attach `#[strategy(path)]` to the fn parameter instead. (Note: deterministic seeding via `seed` is not supported by upstream `quickcheck`; see the README's reference table.)
  --> tests/ui/test_attr_unknown_reserved_key.rs:3:14
   |
 3 | #[quickcheck(case = 10)]

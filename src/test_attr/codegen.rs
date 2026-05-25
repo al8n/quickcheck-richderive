@@ -4,17 +4,27 @@
 //! function that:
 //!
 //! 1. Re-emits the user's function verbatim as an inner item (so its body,
-//!    attrs, generics, and visibility round-trip with zero behaviour change).
-//! 2. For each per-arg override, emits a private newtype that implements
-//!    `quickcheck::Arbitrary` by calling the user-supplied generator path and
+//!    attrs, generics, and visibility round-trip with zero behaviour change),
+//!    with any `#[strategy(...)]` attributes stripped from the parameter list.
+//! 2. For each `#[strategy(path)]`-bearing arg, emits a private newtype that
+//!    implements `Arbitrary` by calling the user-supplied generator path and
 //!    delegating `shrink` to the underlying type — this preserves shrinking
 //!    without exposing a `Shrink` knob in the attribute surface.
-//! 3. Emits a `__wrapper` fn matching the user's signature on the un-overridden
-//!    args and the newtype on overridden args; the wrapper unwraps each
-//!    newtype and forwards to the inner fn.
+//! 3. Emits a `__wrapper` fn matching the user's signature on the
+//!    un-overridden args and the newtype on overridden args; the wrapper
+//!    unwraps each newtype and forwards to the inner fn.
 //! 4. Builds `QuickCheck::new().rng(Gen::new(gen_size)).tests(...).max_tests(...)`
 //!    [optionally `.min_tests_passed(...)`] and finally `.quickcheck(__wrapper
 //!    as fn(...) -> R)`.
+//! 5. Injects local `prop_assert!` / `prop_assert_eq!` / `prop_assert_ne!`
+//!    `macro_rules!` definitions before the inner fn item, so the user's
+//!    body can use them. They expand to `return TestResult::error(...)` on
+//!    failure (no panic), which lets the runner shrink without losing the
+//!    failure message.
+//!
+//! All `quickcheck` paths in the generated code go through the resolved
+//! `crate = "..."` knob (default `::quickcheck`) — including the injected
+//! macro bodies.
 //!
 //! Identifier hygiene: every generated ident is `mixed_site` and carries a
 //! `__qrd_` prefix so it cannot collide with user-supplied idents in the
@@ -24,13 +34,14 @@
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
-  Error, FnArg, Ident, ItemFn, Pat, PatType, ReturnType, Signature, Type, spanned::Spanned,
+  Attribute, Error, FnArg, Ident, ItemFn, Pat, PatType, Path, ReturnType, Signature, Type,
+  spanned::Spanned,
 };
 
-use crate::test_attr::parse::{ArgOverride, TestAttrArgs};
+use crate::test_attr::parse::TestAttrArgs;
 
 /// Internal description of one of the user fn's positional arguments after
-/// matching it against the parsed attribute overrides.
+/// matching it against any per-arg `#[strategy(...)]` attributes.
 struct ArgPlan {
   /// The original parameter ident from the user's signature (always present —
   /// patterns are rejected upstream).
@@ -42,21 +53,32 @@ struct ArgPlan {
   /// The parameter's declared type (preserved verbatim for the inner fn / the
   /// newtype's inner field type).
   ty: Type,
-  /// `Some(path)` if a `<ident> = "path"` override applied; the wrapper
-  /// will then box the arg through a generated newtype calling `path(g)`.
-  override_path: Option<syn::Path>,
+  /// `Some(path)` if a `#[strategy(path)]` attribute applied to this arg; the
+  /// wrapper will then box the arg through a generated newtype calling
+  /// `path(g)`.
+  strategy_path: Option<Path>,
+  /// Original non-`strategy` attributes on the parameter, preserved on the
+  /// inner-fn parameter (e.g. `#[allow(unused)]` survives the rewrite).
+  passthrough_attrs: Vec<Attribute>,
 }
 
 /// Main entry point. Returns the generated `#[test]` `fn { ... }` token stream
 /// or a `syn::Error` for any user-facing diagnostic.
-pub(crate) fn expand(args: TokenStream2, item: ItemFn) -> syn::Result<TokenStream2> {
+pub(crate) fn expand(args: TokenStream2, mut item: ItemFn) -> syn::Result<TokenStream2> {
   let parsed_args = TestAttrArgs::parse(args)?;
+  let qc: Path = parsed_args.crate_path();
 
   // Reject signature shapes we don't support, with focused spans so the
-  // user sees the offending bit and not the whole attribute.
+  // user sees the offending bit and not the whole attribute. We do this
+  // **before** scanning for `#[strategy(...)]` so a pattern-arg with a
+  // strategy attached fails with the pattern-rejection diagnostic — the
+  // strategy attr is meaningless on a non-ident binding.
   reject_unsupported_signature(&item.sig)?;
 
-  let plans = build_arg_plans(&item.sig, &parsed_args.arg_overrides)?;
+  // Scan the fn's inputs for `#[strategy(...)]`, strip those attrs from the
+  // signature in-place (so the re-emitted inner fn doesn't see them), and
+  // build the per-arg plan. Errors are anchored at the attribute's span.
+  let plans = build_arg_plans(&mut item.sig)?;
 
   // Names we generate. Span::mixed_site keeps them invisible to the user
   // body; the `__qrd_` prefix is for human eyes during compiler errors.
@@ -64,8 +86,8 @@ pub(crate) fn expand(args: TokenStream2, item: ItemFn) -> syn::Result<TokenStrea
   let wrapper_fn_ident: Ident = Ident::new("__qrd_wrapper", Span::mixed_site());
   let g_param: Ident = Ident::new("__qrd_g", Span::mixed_site());
 
-  // Per-override newtype defs + the wrapper-side conversion expression.
-  let newtype_defs = plans.iter().filter_map(|p| newtype_def(p, &g_param));
+  // Per-strategy newtype defs + the wrapper-side conversion expression.
+  let newtype_defs = plans.iter().filter_map(|p| newtype_def(p, &g_param, &qc));
   let newtype_defs: Vec<TokenStream2> = newtype_defs.collect();
 
   // Wrapper-fn parameter list and the call-into-inner argument list.
@@ -82,7 +104,7 @@ pub(crate) fn expand(args: TokenStream2, item: ItemFn) -> syn::Result<TokenStrea
     .iter()
     .map(|p| {
       let pname = wrapper_param_ident(&p.ident);
-      if p.override_path.is_some() {
+      if p.strategy_path.is_some() {
         // Newtype: unwrap the `.0` (`Clone` already derived so this move is
         // straightforward — we own `pname` by-value into the wrapper).
         quote!(#pname.0)
@@ -94,8 +116,7 @@ pub(crate) fn expand(args: TokenStream2, item: ItemFn) -> syn::Result<TokenStrea
 
   // The wrapper's parameter *types* for the `as fn(...) -> R` coercion.
   // Must match `wrapper_params` exactly — but stripped of the param names.
-  let wrapper_fn_type_inputs: Vec<TokenStream2> =
-    plans.iter().map(wrapper_param_type).collect();
+  let wrapper_fn_type_inputs: Vec<TokenStream2> = plans.iter().map(wrapper_param_type).collect();
 
   // The user's return type, preserved verbatim. Default to `()` so the
   // `as fn(...) -> R` coercion is always well-formed.
@@ -107,16 +128,18 @@ pub(crate) fn expand(args: TokenStream2, item: ItemFn) -> syn::Result<TokenStrea
   // The inner fn's parameter list, by-position, with the user's natural types
   // so the body — which references the original idents — compiles unchanged.
   // Preserve `mut` on the binding so `fn f(mut x: u8) { x += 1; }` still
-  // type-checks inside the rewritten inner fn.
+  // type-checks inside the rewritten inner fn. Carry over any non-strategy
+  // attribute the user put on the param (e.g. `#[allow(unused)]`).
   let inner_params: Vec<TokenStream2> = plans
     .iter()
     .map(|p| {
       let id = &p.ident;
       let ty = &p.ty;
+      let attrs = &p.passthrough_attrs;
       if p.mutability {
-        quote!(mut #id: #ty)
+        quote!(#(#attrs)* mut #id: #ty)
       } else {
-        quote!(#id: #ty)
+        quote!(#(#attrs)* #id: #ty)
       }
     })
     .collect();
@@ -148,17 +171,29 @@ pub(crate) fn expand(args: TokenStream2, item: ItemFn) -> syn::Result<TokenStrea
   // libtest harvests as the test, which is the outer `#[test]` fn.
   let outer_attrs = &item.attrs;
 
+  // The `prop_assert!` family — `macro_rules!` items emitted before the
+  // inner fn so they're in scope for the user's body. Rust's `macro_rules!`
+  // scoping is textual and DOES propagate into nested items, including the
+  // inner fn we re-emit. The macros expand to
+  // `return <qc>::TestResult::error(...)` so failures don't panic and
+  // shrinking can proceed; users wanting plain `assert!` keep using it.
+  let prop_macros = prop_assert_macros(&qc);
+
   // The wrapper forwards directly: each wrapper param is unwrapped (for
-  // overridden args, `.0` peels the newtype; otherwise pass-through) and
+  // strategy args, `.0` peels the newtype; otherwise pass-through) and
   // handed straight to the inner fn in positional order.
   Ok(quote! {
     #(#outer_attrs)*
     #[test]
     fn #outer_name() {
+      // `prop_assert!` family — in scope for the user's body via macro_rules
+      // textual hoisting.
+      #prop_macros
+
       // Re-emit the user's fn verbatim, renamed to the inner ident.
       #inner_item
 
-      // Per-override newtypes (zero of them if no overrides).
+      // Per-strategy newtypes (zero of them if no overrides).
       #(#newtype_defs)*
 
       // The wrapper-fn whose signature is what `.quickcheck()` will run
@@ -168,14 +203,134 @@ pub(crate) fn expand(args: TokenStream2, item: ItemFn) -> syn::Result<TokenStrea
         #inner_fn_ident(#(#inner_call_args),*)
       }
 
-      ::quickcheck::QuickCheck::new()
-        .rng(::quickcheck::Gen::new(#gen_size))
+      #qc::QuickCheck::new()
+        .rng(#qc::Gen::new(#gen_size))
         .tests(#cases)
         .max_tests(#max_tests)
         #min_chain
         .quickcheck(#wrapper_fn_ident as fn(#(#wrapper_fn_type_inputs),*) -> #return_ty);
     }
   })
+}
+
+/// The three `prop_assert*!` macro_rules definitions, parameterised on the
+/// resolved quickcheck crate path. Each macro expands to a `return` of
+/// `<qc>::TestResult::error(...)` on failure — non-panicking, shrink-friendly.
+fn prop_assert_macros(qc: &Path) -> TokenStream2 {
+  // `macro_rules!` token-trees aren't templated by `quote` substitution —
+  // `$cond` and friends must reach the expander verbatim, while `#qc`
+  // *does* substitute the resolved path. The `concat!`/`format!` calls
+  // bake `file!()`/`line!()` at the **user's** call site (the canonical
+  // proptest behaviour), since `macro_rules!` expansion preserves the
+  // invoker's `Span::call_site` for those builtins.
+  quote! {
+    macro_rules! prop_assert {
+      ($cond:expr $(,)?) => {
+        if !($cond) {
+          return #qc::TestResult::error(
+            ::core::concat!(::core::file!(), ":", ::core::line!(), ": ", ::core::stringify!($cond))
+          );
+        }
+      };
+      ($cond:expr, $($fmt:tt)+) => {
+        if !($cond) {
+          return #qc::TestResult::error(
+            ::std::format!(
+              "{}:{}: {}: {}",
+              ::core::file!(),
+              ::core::line!(),
+              ::core::stringify!($cond),
+              ::core::format_args!($($fmt)+)
+            )
+          );
+        }
+      };
+    }
+
+    macro_rules! prop_assert_eq {
+      ($left:expr, $right:expr $(,)?) => {
+        {
+          let __qrd_left = &($left);
+          let __qrd_right = &($right);
+          if !(*__qrd_left == *__qrd_right) {
+            return #qc::TestResult::error(
+              ::std::format!(
+                "{}:{}: {} == {} failed: left = {:?}, right = {:?}",
+                ::core::file!(),
+                ::core::line!(),
+                ::core::stringify!($left),
+                ::core::stringify!($right),
+                __qrd_left,
+                __qrd_right,
+              )
+            );
+          }
+        }
+      };
+      ($left:expr, $right:expr, $($fmt:tt)+) => {
+        {
+          let __qrd_left = &($left);
+          let __qrd_right = &($right);
+          if !(*__qrd_left == *__qrd_right) {
+            return #qc::TestResult::error(
+              ::std::format!(
+                "{}:{}: {} == {} failed: left = {:?}, right = {:?}: {}",
+                ::core::file!(),
+                ::core::line!(),
+                ::core::stringify!($left),
+                ::core::stringify!($right),
+                __qrd_left,
+                __qrd_right,
+                ::core::format_args!($($fmt)+),
+              )
+            );
+          }
+        }
+      };
+    }
+
+    macro_rules! prop_assert_ne {
+      ($left:expr, $right:expr $(,)?) => {
+        {
+          let __qrd_left = &($left);
+          let __qrd_right = &($right);
+          if !(*__qrd_left != *__qrd_right) {
+            return #qc::TestResult::error(
+              ::std::format!(
+                "{}:{}: {} != {} failed: left = {:?}, right = {:?}",
+                ::core::file!(),
+                ::core::line!(),
+                ::core::stringify!($left),
+                ::core::stringify!($right),
+                __qrd_left,
+                __qrd_right,
+              )
+            );
+          }
+        }
+      };
+      ($left:expr, $right:expr, $($fmt:tt)+) => {
+        {
+          let __qrd_left = &($left);
+          let __qrd_right = &($right);
+          if !(*__qrd_left != *__qrd_right) {
+            return #qc::TestResult::error(
+              ::std::format!(
+                "{}:{}: {} != {} failed: left = {:?}, right = {:?}: {}",
+                ::core::file!(),
+                ::core::line!(),
+                ::core::stringify!($left),
+                ::core::stringify!($right),
+                __qrd_left,
+                __qrd_right,
+                ::core::format_args!($($fmt)+),
+              )
+            );
+          }
+        }
+      };
+    }
+  }
 }
 
 /// Rewrite the user's `ItemFn` to use `inner_ident` as its name and a flat
@@ -264,23 +419,25 @@ fn reject_unsupported_signature(sig: &Signature) -> syn::Result<()> {
   Ok(())
 }
 
-/// Build the per-arg plan, matching each parameter against the parsed
-/// overrides. Any override naming a non-existent parameter is reported with
-/// the *override's* span (since that's the user's typo).
-fn build_arg_plans(
-  sig: &Signature,
-  overrides: &[ArgOverride],
-) -> syn::Result<Vec<ArgPlan>> {
-  // First, harvest the (ident, ty) pairs from the signature.
+/// Build the per-arg plan, harvesting each parameter's ident/type/mutability
+/// and (consuming + stripping) any `#[strategy(...)]` attribute it carries.
+///
+/// **Mutates `sig.inputs` in place** to remove the `#[strategy(...)]`
+/// attributes, so the re-emitted inner fn doesn't carry them (rustc would
+/// reject an unknown built-in attribute on a fn parameter).
+fn build_arg_plans(sig: &mut Signature) -> syn::Result<Vec<ArgPlan>> {
   let mut plans: Vec<ArgPlan> = Vec::with_capacity(sig.inputs.len());
-  for input in &sig.inputs {
+
+  for input in sig.inputs.iter_mut() {
     match input {
-      FnArg::Typed(PatType { pat, ty, .. }) => {
+      FnArg::Typed(PatType { attrs, pat, ty, .. }) => {
         let (ident, mutability) = match pat.as_ref() {
           Pat::Ident(pi) => (pi.ident.clone(), pi.mutability.is_some()),
           // Already rejected by `reject_unsupported_signature`; defensive
-          // fallback to keep the error surface honest if anyone ever
-          // shuffles the call order.
+          // fallback in case anyone reorders calls. Plus: if a strategy
+          // attr was attached to a pattern-arg, the pattern-rejection
+          // diagnostic fires first (we already returned upstream); this
+          // branch only fires on internal-invariant violation.
           other => {
             return Err(Error::new(
               other.span(),
@@ -288,11 +445,46 @@ fn build_arg_plans(
             ));
           }
         };
+
+        // Split attrs into the strategy attr (consumed) and pass-through
+        // attrs (kept on the inner fn's parameter).
+        let mut strategy_path: Option<Path> = None;
+        let mut passthrough: Vec<Attribute> = Vec::with_capacity(attrs.len());
+
+        for attr in attrs.drain(..) {
+          if attr.path().is_ident("strategy") {
+            // Multiple `#[strategy(...)]` on the same arg → user error,
+            // anchored at the offending repeat.
+            if strategy_path.is_some() {
+              return Err(Error::new(
+                attr.span(),
+                format!(
+                  "duplicate `#[strategy(...)]` on parameter `{ident}` — \
+                   each parameter accepts at most one strategy attribute"
+                ),
+              ));
+            }
+            // The body of `#[strategy(...)]` is a *path expression*
+            // (no quoting needed): we parse it as a `syn::Path` so it's
+            // emitted verbatim and resolved at codegen time.
+            let path: Path = attr.parse_args::<Path>().map_err(|e| {
+              Error::new(
+                e.span(),
+                format!("`#[strategy(...)]` expects a path (e.g. `#[strategy(my::gen)]`): {e}"),
+              )
+            })?;
+            strategy_path = Some(path);
+          } else {
+            passthrough.push(attr);
+          }
+        }
+
         plans.push(ArgPlan {
           ident,
           mutability,
           ty: (**ty).clone(),
-          override_path: None,
+          strategy_path,
+          passthrough_attrs: passthrough,
         });
       }
       // Already rejected; mirror the diagnostic.
@@ -305,46 +497,27 @@ fn build_arg_plans(
     }
   }
 
-  // Now attach overrides. A second override for the same ident is a parser
-  // error (caught upstream), so each pass here is unique.
-  for ov in overrides {
-    let target = plans.iter_mut().find(|p| p.ident == ov.arg);
-    match target {
-      Some(plan) => plan.override_path = Some(ov.path.clone()),
-      None => {
-        return Err(Error::new(
-          ov.arg.span(),
-          format!(
-            "`{}` is not a parameter of this function — per-arg overrides must name \
-             one of the fn's positional arguments",
-            ov.arg
-          ),
-        ));
-      }
-    }
-  }
-
   Ok(plans)
 }
 
-/// For a per-override arg `a: T`, build a newtype:
+/// For a per-strategy arg `a: T`, build a newtype:
 ///
 /// ```ignore
 /// #[derive(Clone)]
 /// struct __QrdArg_a(T);
 /// impl ::core::fmt::Debug for __QrdArg_a { ... }
-/// impl ::quickcheck::Arbitrary for __QrdArg_a {
-///     fn arbitrary(g: &mut ::quickcheck::Gen) -> Self { Self(<path>(g)) }
+/// impl <qc>::Arbitrary for __QrdArg_a {
+///     fn arbitrary(g: &mut <qc>::Gen) -> Self { Self(<path>(g)) }
 ///     fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
-///         Box::new(<T as ::quickcheck::Arbitrary>::shrink(&self.0).map(__QrdArg_a))
+///         Box::new(<T as <qc>::Arbitrary>::shrink(&self.0).map(__QrdArg_a))
 ///     }
 /// }
 /// ```
 ///
-/// Returns `None` for non-overridden args (they pass through their natural
+/// Returns `None` for non-strategy args (they pass through their natural
 /// type, no newtype needed).
-fn newtype_def(plan: &ArgPlan, g_param: &Ident) -> Option<TokenStream2> {
-  let path = plan.override_path.as_ref()?;
+fn newtype_def(plan: &ArgPlan, g_param: &Ident, qc: &Path) -> Option<TokenStream2> {
+  let path = plan.strategy_path.as_ref()?;
   let ty = &plan.ty;
   let nt_name = newtype_ident(&plan.ident);
 
@@ -363,20 +536,20 @@ fn newtype_def(plan: &ArgPlan, g_param: &Ident) -> Option<TokenStream2> {
       }
     }
 
-    impl ::quickcheck::Arbitrary for #nt_name {
-      fn arbitrary(#g_param: &mut ::quickcheck::Gen) -> Self {
+    impl #qc::Arbitrary for #nt_name {
+      fn arbitrary(#g_param: &mut #qc::Gen) -> Self {
         Self(#path(#g_param))
       }
       fn shrink(&self) -> ::std::boxed::Box<dyn ::core::iter::Iterator<Item = Self>> {
         ::std::boxed::Box::new(
-          <#ty as ::quickcheck::Arbitrary>::shrink(&self.0).map(#nt_name)
+          <#ty as #qc::Arbitrary>::shrink(&self.0).map(#nt_name)
         )
       }
     }
   })
 }
 
-/// Per-override newtype name: `__QrdArg_<ident>`. Embedding the original
+/// Per-strategy newtype name: `__QrdArg_<ident>`. Embedding the original
 /// ident keeps compiler diagnostics readable when the user's generator path
 /// has the wrong signature.
 fn newtype_ident(arg: &Ident) -> Ident {
@@ -393,7 +566,7 @@ fn wrapper_param_ident(arg: &Ident) -> Ident {
 /// Wrapper-fn parameter type: the newtype if overridden, else the natural
 /// type.
 fn wrapper_param_type(plan: &ArgPlan) -> TokenStream2 {
-  if plan.override_path.is_some() {
+  if plan.strategy_path.is_some() {
     let nt = newtype_ident(&plan.ident);
     quote!(#nt)
   } else {

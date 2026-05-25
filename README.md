@@ -341,14 +341,18 @@ fn gen_pixels(g: &mut Gen) -> Pixels { Pixels::arbitrary(g) }
 
 In addition to the derive, the crate ships a **`#[quickcheck_richderive::quickcheck]`**
 proc-macro-attribute — a drop-in alternative to
-[`quickcheck_macros::quickcheck`] that adds two knobs:
+[`quickcheck_macros::quickcheck`] that adds:
 
-1. **Per-arg generator overrides** (mirroring the derive's
-   `#[quickcheck(arbitrary = "path")]` field attr): give individual fn
-   arguments their own `fn(&mut Gen) -> T` instead of the type's `Arbitrary`
-   impl.
+1. **Per-arg generator strategies** via `#[strategy(path)]` on the fn
+   parameters (proptest-style shape): give individual fn arguments their
+   own `fn(&mut Gen) -> T` instead of the type's `Arbitrary` impl.
 2. **Per-test runner config**: tune `cases`, `max_tests`, `gen_size`, and
    `min_tests_passed` at the call site.
+3. **`crate = "..."` knob**: point the generated code at a re-exported or
+   renamed `quickcheck` (mirrors the derive's `crate` attribute).
+4. **`prop_assert!` / `prop_assert_eq!` / `prop_assert_ne!`** — assertion
+   macros that return `TestResult::error(...)` on failure (no panic), so
+   the runner can shrink without losing the formatted failure message.
 
 The bare form behaves like vanilla `#[quickcheck]` from `quickcheck_macros` —
 each arg uses its type's `Arbitrary`:
@@ -366,7 +370,7 @@ fn idempotent(xs: Vec<u32>) -> bool {
 }
 ```
 
-With arguments:
+With a per-arg strategy and runner config:
 
 ```rust,ignore
 use quickcheck_richderive::quickcheck;
@@ -375,14 +379,17 @@ fn small_positive(g: &mut ::quickcheck::Gen) -> i32 {
     (u8::arbitrary(g) as i32) + 1
 }
 
-#[quickcheck(cases = 1000, gen_size = 64, a = "small_positive")]
-fn round_trip(a: i32, b: String) -> bool {
+#[quickcheck(cases = 1000, gen_size = 64)]
+fn round_trip(
+    #[strategy(small_positive)] a: i32,
+    b: String,
+) -> bool {
     let _ = (a, b);
     true
 }
 ```
 
-### Attribute keys
+### Attribute keys (outer `#[quickcheck(...)]`)
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
@@ -390,16 +397,108 @@ fn round_trip(a: i32, b: String) -> bool {
 | `max_tests = N` | `u64` literal | `10_000` | `.max_tests(N)` (discard cap) |
 | `gen_size = N` | `usize` literal | `100` | `Gen::new(N)` |
 | `min_tests_passed = N` | `u64` literal | _unset_ | `.min_tests_passed(N)` (omits the chained call when unset) |
-| `<arg_ident> = "path::to::fn"` | path string | `<ArgT as Arbitrary>::arbitrary` | per-arg generator override; expects `fn(&mut Gen) -> ArgT` |
+| `crate = "..."` | path string | `::quickcheck` | base path for `Arbitrary` / `Gen` / `QuickCheck` / `TestResult` and the injected `prop_assert!` family |
 
-Unknown reserved-shaped keys (`case`, `test`, `size`, `seed`, …) are rejected
-with a focused error pointed at the key span.
+Any other key is rejected with a focused error pointed at the key span — in
+particular, per-arg generators are no longer declared in the outer
+attribute. Use `#[strategy(...)]` on the parameter instead.
 
 **No `seed` key.** `quickcheck::Gen` has no public seed API in 1.x, so a
 `seed = …` knob would require an unsafe transmute or a fork of `quickcheck`
 itself. If you need deterministic sequences, build a custom generator backed
 by an RNG you control (e.g. `rand::rngs::StdRng::seed_from_u64`) and wire it
-through a per-arg override; the macro provides no shortcut.
+through a `#[strategy(...)]` parameter attribute; the macro provides no
+shortcut.
+
+### `#[strategy(path)]` on fn parameters
+
+Per-argument generator overrides live on the fn parameters as a proptest-
+style sibling attribute:
+
+```rust,ignore
+fn small_positive(g: &mut ::quickcheck::Gen) -> i32 {
+    (u32::arbitrary(g) % 100) as i32 + 1
+}
+
+#[quickcheck_richderive::quickcheck(cases = 1000)]
+fn round_trip(
+    #[strategy(small_positive)] a: i32,
+    b: String,  // no override — uses <String as Arbitrary>::arbitrary
+) -> bool {
+    let _ = (a, b);
+    true
+}
+```
+
+The body of `#[strategy(...)]` is a **path expression** (no quoting). The
+path must resolve to a `fn(&mut Gen) -> ArgT` — same signature as
+`Arbitrary::arbitrary`. Each strategy-bearing arg is wrapped in a private
+newtype whose `Arbitrary::arbitrary` calls your path and whose `shrink`
+delegates to `<ArgT as Arbitrary>::shrink` — so shrinking still works on
+counter-examples even though you only supplied a generator. No `Shrink`
+knob is exposed on the attribute surface.
+
+`#[strategy(...)]` is only valid on plain `ident: type` parameters — a
+destructuring pattern (`(a, b): (T, U)`) is rejected by the same
+diagnostic that already rejects pattern-bound parameters.
+
+### `prop_assert!` / `prop_assert_eq!` / `prop_assert_ne!`
+
+The attribute injects three assertion macros into scope of the user's body.
+On failure they `return TestResult::error(...)` with a formatted message
+that includes file/line + the stringified condition (or `left`/`right`
+debug-printed for the `eq` / `ne` forms) + an optional user-supplied
+`format!`-style suffix.
+
+```rust,ignore
+use quickcheck_richderive::quickcheck;
+use quickcheck::TestResult;
+
+#[quickcheck]
+fn sort_is_sorted(xs: Vec<u32>) -> TestResult {
+    let mut sorted = xs.clone();
+    sorted.sort();
+    for w in sorted.windows(2) {
+        prop_assert!(w[0] <= w[1], "ordering violated: {:?}", w);
+    }
+    TestResult::passed()
+}
+
+#[quickcheck]
+fn double_then_halve(x: u32) -> TestResult {
+    prop_assert_eq!(x.wrapping_mul(2).wrapping_div(2), x);
+    TestResult::passed()
+}
+```
+
+Failures bubble up as `TestResult::error` rather than as panics, which keeps
+the runner's shrinker active and lets the formatted message reach
+quickcheck's diagnostic output. Users who want plain `assert!` keep using
+it — `panic!`-based failures still trigger shrinking (just with noisier
+output). The macros are intended for `TestResult`-returning tests; with a
+`-> bool` or `-> ()` body the `return` would be a type error.
+
+### `crate = "::path::to::quickcheck"`
+
+Point the generated code at a re-exported or renamed `quickcheck`. Useful
+when `quickcheck` is re-exported through another crate, or vendored under a
+different name. The resolved path is used everywhere the macro names
+`quickcheck` symbols — `Arbitrary`, `Gen`, `QuickCheck`, `TestResult`, and
+the injected `prop_assert!` macro bodies.
+
+```rust,ignore
+use quickcheck_richderive::quickcheck;
+
+mod reexport {
+    pub use quickcheck::*;
+}
+
+#[quickcheck(crate = "crate::reexport")]
+fn t(x: u8) -> bool {
+    let _ = x;
+    true
+}
+```
 
 ### Return types
 
@@ -410,25 +509,20 @@ The annotated fn may return anything `quickcheck::Testable` accepts:
 * `quickcheck::TestResult` — `passed` / `failed` / `discard` / `error`
 * `Result<T: Testable, E: Debug>` — `Err` ⇒ fail
 
-No restriction beyond what `quickcheck` itself enforces.
-
-### Per-arg shrinking
-
-Each overridden arg is wrapped in a private newtype whose `Arbitrary` impl
-calls your generator path and whose `shrink` delegates to the underlying
-type's `Arbitrary::shrink` — so shrinking still works on counter-examples
-even though you only supplied an `arbitrary` half. No `Shrink` knob is exposed
-on the attribute surface.
+No restriction beyond what `quickcheck` itself enforces. The
+`prop_assert!` family requires `-> TestResult` (or `-> Result<..., ...>`
+where the `Ok` type is `TestResult`).
 
 ### Compile-time errors
 
 These are caught at macro-expansion time with focused spans (covered by the
 `tests/ui` suite):
 
-* unknown reserved-shaped key (typos of `cases` etc.);
+* unknown outer key (typos of `cases` etc., or any non-reserved ident —
+  per-arg overrides are no longer outer-kv, they live on the parameter);
 * shape mismatch (`cases = "100"` — string where an integer is expected, or
   vice versa);
-* a per-arg override naming an identifier that isn't a parameter of the fn;
+* `#[strategy(...)]` on a destructured / pattern-bound parameter;
 * `async fn` (no async test runner in upstream `quickcheck`);
 * `unsafe fn`, generic fns, methods (`self`-receivers), variadic fns, and
   destructuring patterns in the fn signature (use plain `name: ty` and

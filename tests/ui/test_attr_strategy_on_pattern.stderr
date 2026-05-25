@@ -1,0 +1,5 @@
+error: #[quickcheck_richderive::quickcheck] expects each fn argument to be a plain identifier (no patterns); rebind inside the body if you need destructuring
+ --> tests/ui/test_attr_strategy_on_pattern.rs:8:26
+  |
+8 | fn t(#[strategy(my_gen)] (a, b): (i32, i32)) -> bool {
+  |                          ^^^^^^
