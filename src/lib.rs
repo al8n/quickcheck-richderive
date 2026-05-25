@@ -5,12 +5,13 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-  Data, DeriveInput, Error, Ident, Path, Token, Type, WherePredicate, parse_macro_input,
+  Data, DeriveInput, Error, Ident, ItemFn, Path, Token, Type, WherePredicate, parse_macro_input,
   punctuated::Punctuated,
 };
 
 mod attrs;
 mod codegen;
+mod test_attr;
 
 use attrs::{ContainerAttrs, FieldAttrs, VariantAttrs};
 
@@ -22,6 +23,37 @@ use attrs::{ContainerAttrs, FieldAttrs, VariantAttrs};
 pub fn derive_arbitrary(input: TokenStream) -> TokenStream {
   let input = parse_macro_input!(input as DeriveInput);
   expand(input)
+    .unwrap_or_else(Error::into_compile_error)
+    .into()
+}
+
+/// Proptest-style `#[test]` attribute with per-arg generator overrides and
+/// per-test config.
+///
+/// Drops in as a replacement for `#[quickcheck_macros::quickcheck]`. The bare
+/// form `#[quickcheck_richderive::test]` is behaviour-identical (each arg uses
+/// its type's `Arbitrary` impl); attribute arguments unlock per-arg generators
+/// and per-test runner tuning.
+///
+/// ```ignore
+/// use quickcheck_richderive::test;
+///
+/// fn small_positive(g: &mut ::quickcheck::Gen) -> i32 {
+///     (u32::arbitrary(g) % 100) as i32 + 1
+/// }
+///
+/// #[test(cases = 1000, a = "small_positive")]
+/// fn round_trip(a: i32, b: String) -> bool {
+///     encode(&a, &b).decode() == (a, b)
+/// }
+/// ```
+///
+/// See the README's `#[test] attribute` section for the full key reference.
+#[proc_macro_attribute]
+pub fn test(args: TokenStream, item: TokenStream) -> TokenStream {
+  let args = TokenStream2::from(args);
+  let item = parse_macro_input!(item as ItemFn);
+  test_attr::expand(args, item)
     .unwrap_or_else(Error::into_compile_error)
     .into()
 }

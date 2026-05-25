@@ -1,6 +1,30 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — `#[test]` attribute macro
+
+### Added
+
+- **`#[quickcheck_richderive::test]`** — a proptest-style proc-macro-attribute
+  for property tests, drop-in for `#[quickcheck_macros::quickcheck]`:
+  - **Per-arg generator overrides** — `<arg_ident> = "path::to::fn"` swaps an
+    individual fn argument's `Arbitrary` impl for a user-supplied
+    `fn(&mut Gen) -> ArgT`. Mirrors the derive's existing
+    `#[quickcheck(arbitrary = "path")]` field attribute.
+  - **Per-test runner config** — `cases`, `max_tests`, `gen_size`, and
+    `min_tests_passed` at the call site (no need to hand-roll a
+    `QuickCheck::new()…` chain).
+  - Bare form (`#[quickcheck_richderive::test]` with no args) is
+    behaviour-identical to vanilla `#[quickcheck]`.
+  - Return type acceptance set matches `quickcheck::Testable`: `bool`, `()`,
+    `TestResult`, and `Result<T: Testable, E: Debug>` all pass through
+    unchanged.
+  - Per-arg overrides preserve shrinking by wrapping each overridden arg in a
+    private newtype that delegates `shrink` to the underlying type's
+    `Arbitrary::shrink` — no `Shrink` knob is exposed on the attribute
+    surface.
+  - **No `seed` key.** `quickcheck::Gen` has no public seed API; deterministic
+    sequences require a custom generator backed by an RNG you control. See
+    the README's `#[test]` attribute section for details.
 
 ## 0.2.0 — serde-style attribute surface
 

@@ -337,6 +337,105 @@ fn gen_pixels(g: &mut Gen) -> Pixels { Pixels::arbitrary(g) }
   field shrunk and the rest cloned. Unit variants, `skip`ped variants, and
   fully held-constant variants shrink to empty.
 
+## `#[test]` attribute
+
+In addition to the derive, the crate ships a **`#[quickcheck_richderive::test]`**
+proc-macro-attribute — a drop-in alternative to
+[`quickcheck_macros::quickcheck`] that adds two knobs:
+
+1. **Per-arg generator overrides** (mirroring the derive's
+   `#[quickcheck(arbitrary = "path")]` field attr): give individual fn
+   arguments their own `fn(&mut Gen) -> T` instead of the type's `Arbitrary`
+   impl.
+2. **Per-test runner config**: tune `cases`, `max_tests`, `gen_size`, and
+   `min_tests_passed` at the call site.
+
+The bare form behaves like vanilla `#[quickcheck]` — each arg uses its type's
+`Arbitrary`:
+
+```rust,ignore
+use quickcheck_richderive::test;
+
+#[test]
+fn idempotent(xs: Vec<u32>) -> bool {
+    let mut a = xs.clone();
+    a.sort(); a.sort();
+    let mut b = xs;
+    b.sort();
+    a == b
+}
+```
+
+With arguments:
+
+```rust,ignore
+use quickcheck_richderive::test;
+
+fn small_positive(g: &mut ::quickcheck::Gen) -> i32 {
+    (u8::arbitrary(g) as i32) + 1
+}
+
+#[test(cases = 1000, gen_size = 64, a = "small_positive")]
+fn round_trip(a: i32, b: String) -> bool {
+    let _ = (a, b);
+    true
+}
+```
+
+### Attribute keys
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `cases = N` | `u64` literal | `100` | `.tests(N)` on the runner |
+| `max_tests = N` | `u64` literal | `10_000` | `.max_tests(N)` (discard cap) |
+| `gen_size = N` | `usize` literal | `100` | `Gen::new(N)` |
+| `min_tests_passed = N` | `u64` literal | _unset_ | `.min_tests_passed(N)` (omits the chained call when unset) |
+| `<arg_ident> = "path::to::fn"` | path string | `<ArgT as Arbitrary>::arbitrary` | per-arg generator override; expects `fn(&mut Gen) -> ArgT` |
+
+Unknown reserved-shaped keys (`case`, `test`, `size`, `seed`, …) are rejected
+with a focused error pointed at the key span.
+
+**No `seed` key.** `quickcheck::Gen` has no public seed API in 1.x, so a
+`seed = …` knob would require an unsafe transmute or a fork of `quickcheck`
+itself. If you need deterministic sequences, build a custom generator backed
+by an RNG you control (e.g. `rand::rngs::StdRng::seed_from_u64`) and wire it
+through a per-arg override; the macro provides no shortcut.
+
+### Return types
+
+The annotated fn may return anything `quickcheck::Testable` accepts:
+
+* `bool` — `true` ⇒ pass
+* `()` — never returning normally ⇒ pass; `panic!`/`assert!` ⇒ fail
+* `quickcheck::TestResult` — `passed` / `failed` / `discard` / `error`
+* `Result<T: Testable, E: Debug>` — `Err` ⇒ fail
+
+No restriction beyond what `quickcheck` itself enforces.
+
+### Per-arg shrinking
+
+Each overridden arg is wrapped in a private newtype whose `Arbitrary` impl
+calls your generator path and whose `shrink` delegates to the underlying
+type's `Arbitrary::shrink` — so shrinking still works on counter-examples
+even though you only supplied an `arbitrary` half. No `Shrink` knob is exposed
+on the attribute surface.
+
+### Compile-time errors
+
+These are caught at macro-expansion time with focused spans (covered by the
+`tests/ui` suite):
+
+* unknown reserved-shaped key (typos of `cases` etc.);
+* shape mismatch (`cases = "100"` — string where an integer is expected, or
+  vice versa);
+* a per-arg override naming an identifier that isn't a parameter of the fn;
+* `async fn` (no async test runner in upstream `quickcheck`);
+* `unsafe fn`, generic fns, methods (`self`-receivers), variadic fns, and
+  destructuring patterns in the fn signature (use plain `name: ty` and
+  rebind inside the body if you need a pattern).
+
+[`quickcheck_macros::quickcheck`]: https://docs.rs/quickcheck_macros/latest/quickcheck_macros/attr.quickcheck.html
+
 ## Compile-time errors
 
 The derive reports these as `compile_error!` with a focused span (covered by the

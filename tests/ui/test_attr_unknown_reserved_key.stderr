@@ -1,0 +1,5 @@
+error: unknown key `case` in #[quickcheck_richderive::test(...)]; did you mean one of `cases`, `max_tests`, `gen_size`, `min_tests_passed`? (note: deterministic seeding via `seed` is not supported by upstream `quickcheck`; see the README's reference table)
+ --> tests/ui/test_attr_unknown_reserved_key.rs:3:8
+  |
+3 | #[test(case = 10)]
+  |        ^^^^
