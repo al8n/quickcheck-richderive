@@ -1,6 +1,47 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — `#[quickcheck]` attribute macro
+
+### Added
+
+- **`#[quickcheck_richderive::quickcheck]`** — a proptest-style proc-macro-attribute
+  for property tests, drop-in for `#[quickcheck_macros::quickcheck]` (same
+  attribute name, so swapping the import is the only consumer-side change):
+  - **Per-arg generator strategies** via `#[strategy(path)]` on the fn
+    parameters (proptest-style shape): each parameter can opt out of its
+    type's `Arbitrary::arbitrary` and use a user-supplied
+    `fn(&mut Gen) -> ArgT` instead. The argument to `#[strategy(...)]` is a
+    path expression (no quoting). Only valid on plain `ident: type`
+    parameters — a destructured / pattern-bound parameter is rejected by
+    the same diagnostic that rejects pattern-bound parameters generally.
+    Shrinking is preserved by wrapping each strategy-bearing arg in a
+    private newtype that delegates `shrink` to the underlying type's
+    `Arbitrary::shrink`.
+  - **Per-test runner config** — `cases`, `max_tests`, `gen_size`, and
+    `min_tests_passed` at the call site (no need to hand-roll a
+    `QuickCheck::new()…` chain).
+  - **`crate = "..."` knob** — point the generated code at a re-exported or
+    renamed `quickcheck` (mirrors the derive's `crate` attribute). The
+    resolved path is used everywhere the macro names `quickcheck` symbols —
+    `Arbitrary`, `Gen`, `QuickCheck`, `TestResult`, and the injected
+    `quickcheck_assert!` macro bodies. Default `::quickcheck`.
+  - **`quickcheck_assert!` / `quickcheck_assert_eq!` / `quickcheck_assert_ne!`** — assertion
+    macros injected into scope of the user's body. On failure they
+    `return TestResult::error(...)` with a formatted message that includes
+    file/line + the stringified condition (or `left`/`right` debug-printed
+    for the `eq` / `ne` forms) + an optional user-supplied `format!`-style
+    suffix. Non-panicking failures preserve quickcheck's shrinker. The
+    macros are intended for `TestResult`-returning tests; users who want
+    plain `assert!` keep using it (panic-based failure still triggers
+    shrinking, just with noisier output).
+  - Bare form (`#[quickcheck_richderive::quickcheck]` with no args) is
+    behaviour-identical to vanilla `#[quickcheck_macros::quickcheck]`.
+  - Return type acceptance set matches `quickcheck::Testable`: `bool`, `()`,
+    `TestResult`, and `Result<T: Testable, E: Debug>` all pass through
+    unchanged.
+  - **No `seed` key.** `quickcheck::Gen` has no public seed API; deterministic
+    sequences require a custom generator backed by an RNG you control. See
+    the README's `#[quickcheck]` attribute section for details.
 
 ## 0.2.0 — serde-style attribute surface
 

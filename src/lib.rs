@@ -5,12 +5,13 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-  Data, DeriveInput, Error, Ident, Path, Token, Type, WherePredicate, parse_macro_input,
+  Data, DeriveInput, Error, Ident, ItemFn, Path, Token, Type, WherePredicate, parse_macro_input,
   punctuated::Punctuated,
 };
 
 mod attrs;
 mod codegen;
+mod test_attr;
 
 use attrs::{ContainerAttrs, FieldAttrs, VariantAttrs};
 
@@ -22,6 +23,44 @@ use attrs::{ContainerAttrs, FieldAttrs, VariantAttrs};
 pub fn derive_arbitrary(input: TokenStream) -> TokenStream {
   let input = parse_macro_input!(input as DeriveInput);
   expand(input)
+    .unwrap_or_else(Error::into_compile_error)
+    .into()
+}
+
+/// Proptest-style `#[quickcheck]` attribute with per-arg generator
+/// overrides (via `#[strategy(...)]` on the fn parameters) and per-test
+/// config.
+///
+/// Drops in as a replacement for `#[quickcheck_macros::quickcheck]` (same
+/// attribute name on purpose). The bare form `#[quickcheck_richderive::quickcheck]`
+/// is behaviour-identical to that vanilla attribute (each arg uses its type's
+/// `Arbitrary` impl); attribute arguments unlock runner tuning and the
+/// `crate = "..."` path override.
+///
+/// ```ignore
+/// use quickcheck_richderive::quickcheck;
+///
+/// fn small_positive(g: &mut ::quickcheck::Gen) -> i32 {
+///     (u32::arbitrary(g) % 100) as i32 + 1
+/// }
+///
+/// #[quickcheck(cases = 1000)]
+/// fn round_trip(
+///     #[strategy(small_positive)] a: i32,
+///     b: String,
+/// ) -> bool {
+///     encode(&a, &b).decode() == (a, b)
+/// }
+/// ```
+///
+/// See the README's `#[quickcheck]` attribute section for the full key
+/// reference, `#[strategy(...)]` semantics, the `quickcheck_assert!` family, and
+/// the `crate = "..."` knob.
+#[proc_macro_attribute]
+pub fn quickcheck(args: TokenStream, item: TokenStream) -> TokenStream {
+  let args = TokenStream2::from(args);
+  let item = parse_macro_input!(item as ItemFn);
+  test_attr::expand(args, item)
     .unwrap_or_else(Error::into_compile_error)
     .into()
 }

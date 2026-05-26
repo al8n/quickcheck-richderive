@@ -1,0 +1,5 @@
+error: `cases` expects an integer literal, not a string
+ --> tests/ui/test_attr_wrong_literal_type.rs:3:22
+  |
+3 | #[quickcheck(cases = "100")]
+  |                      ^^^^^

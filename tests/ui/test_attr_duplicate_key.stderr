@@ -1,0 +1,5 @@
+error: duplicate key `cases` in #[quickcheck_richderive::quickcheck(...)]
+ --> tests/ui/test_attr_duplicate_key.rs:3:26
+  |
+3 | #[quickcheck(cases = 10, cases = 20)]
+  |                          ^^^^^
